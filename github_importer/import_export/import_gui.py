@@ -20,9 +20,6 @@ class ImportGUI:
         self.export_button = ttk.Button(self.root, text="Export Milestones", command=self.export_milestones)
         self.export_button.pack(pady=10)
 
-        self.browse_button = ttk.Button(self.root, text="Browse", command=self.open_file_dialog)
-        self.browse_button.pack(pady=10)
-
         self.clear_button = ttk.Button(self.root, text="Clear Issues/Milestones", command=self.clear_milestones_and_issues)
         self.clear_button.pack(pady=10)
 
