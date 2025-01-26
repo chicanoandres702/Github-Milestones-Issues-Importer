@@ -2,7 +2,6 @@ import tkinter as tk
 from tkinter import ttk
 from github_importer.utils.logger import Logger
 
-
 class MainWindow:
     def __init__(self, auth_gui, github_client, import_gui, logger):
         self.root = tk.Tk()
@@ -23,10 +22,10 @@ class MainWindow:
     def update_repo_dropdown(self):
         if self.github_client:
             try:
-                repos = self.github_client.get_user_repos()
-                repo_list = [f"{repo['owner']['login']}/{repo['name']}" for repo in repos]
-                self.repo_selection['values'] = repo_list
-                self.logger.info(f"Repos updated in dropdown: {repo_list}")
+                 repos = self.github_client.get_user_repos()
+                 repo_list = [f"{repo['owner']['login']}/{repo['name']}" for repo in repos]
+                 self.repo_selection['values'] = repo_list
+                 self.logger.info(f"Repos updated in dropdown: {repo_list}")
             except Exception as e:
                 self.logger.error(f"An error has occurred retreiving user repos: {e}")
 

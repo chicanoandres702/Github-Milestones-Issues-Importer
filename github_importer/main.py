@@ -21,11 +21,10 @@ def main():
     # --- GUI Setup ---
     root = None
 
-
     def setup_after_auth(access_token):
         nonlocal github_client, data_importer, root
 
-        github_client = GitHubClient(access_token, logger)
+        github_client = GitHubClient(access_token, logger, auth_manager)
         status_code = github_client.check_access_token()
         if 200 <= status_code <= 299:
                 logger.info(f"Access token retrieved: {access_token}")
