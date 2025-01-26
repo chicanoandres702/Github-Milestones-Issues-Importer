@@ -1,93 +1,82 @@
-import requests
 import webbrowser
-import json
+import requests
 from flask import Flask, request
-from threading import Thread
-import traceback  # Import traceback for detailed error info
+import os
 
 
 class AuthManager:
-    """Manages GitHub authentication."""
-
     def __init__(self, config, logger):
-        self.config = config
+        self.client_id = config.client_id
+        self.redirect_uri = config.redirect_uri
+        self.scope = config.scope
         self.logger = logger
-        self.access_token = None
-        self.server = None
-        self.token_retrieved = False  # Flag to ensure _get_access_token is called only once
         self.on_auth_success = None
 
-    def authorize_github(self):
-        """Opens the browser for GitHub authorization."""
-        url = f"https://github.com/login/oauth/authorize?client_id={self.config.client_id}&redirect_uri={self.config.redirect_uri}&scope={self.config.scope}"
-        webbrowser.open_new_tab(url)
-        self._start_local_server()
+        self.app = Flask(__name__)
+        self.app.add_url_rule('/callback', view_func=self.callback)
+        self.server_port = 8000
 
-    def _start_local_server(self):
-        """Starts a local server to handle OAuth redirect."""
-        app = Flask(__name__)
-        self.server = app
+    def get_authorization_url(self):
+      scope = "%20".join(self.scope)
+      url = (f"https://github.com/login/oauth/authorize?"
+             f"client_id={self.client_id}"
+             f"&redirect_uri={self.redirect_uri}"
+             f"&scope={scope}")
+      return url
+    def start_auth_server(self):
+       """Starts the Flask server to handle the GitHub authorization callback."""
+       self.app.run(port=self.server_port)
+    def start_oauth_flow(self):
+      """Starts the OAuth 2.0 flow by opening the authorization URL in the browser."""
+      url = self.get_authorization_url()
+      webbrowser.open(url)
 
-        @app.route("/callback")
-        def callback():
-            try:
-                if self.token_retrieved:  # Ensure _get_access_token is only called once
-                    self.logger.warning(
-                        "Callback was triggered multiple times. Access token has already been retrieved.")
-                    return "Authentication successful! You can close this page. (Token already retrieved)", 200
-                code = request.args.get("code")
-                self.logger.info(f"Received authorization code: {code}")
-                access_token = self._get_access_token(code, request)  # pass in the request to _get_access_token
-                if access_token:
-                    self.access_token = access_token
-                    self.token_retrieved = True
-                    if self.on_auth_success:
-                        self.on_auth_success(access_token)  # Call the success callback with the token
-                    return "Authentication successful! You can close this page.", 200
-                else:
-                    return "Authentication Failed (See logs for more info)", 400
-            except Exception as e:
-                self.logger.error(f"An unexpected error in callback function occurred: {e} - {traceback.format_exc()}")
-                return "Authentication Failed: an unexpected error occurred (See logs for more info)", 500
+      # Start the Flask app to handle the callback in a non-blocking way
+      import threading
+      auth_server_thread = threading.Thread(target=self.start_auth_server)
+      auth_server_thread.daemon = True  # set the thread as daemon
+      auth_server_thread.start()
 
-        thread = Thread(target=app.run, kwargs={"port": 8000})
-        thread.daemon = True
-        thread.start()
+    def callback(self):
+        """Handles the callback from GitHub after authorization."""
+        code = request.args.get('code')
+        self.logger.info(f"Received authorization code: {code}")
 
-    def _get_access_token(self, code, request):
-        """Exchanges the code for an access token."""
+        # Exchange the code for an access token
+        access_token = self.exchange_code_for_token(code)
+        if access_token:
+            # Call the success callback, passing in the access token
+            if self.on_auth_success:
+                self.on_auth_success(access_token)
+
+            return "Authorization was successful! You can close this page.", 200
+
+        else:
+            return "Authorization failed.", 400
+
+    def exchange_code_for_token(self, code):
+        """Exchanges the authorization code for an access token."""
         url = "https://github.com/login/oauth/access_token"
         data = {
-            "client_id": self.config.client_id,
-            "client_secret": self.config.client_secret,
-            "code": code
-        }
-        headers = {"Accept": "application/json"}
-        try:
-            self.logger.info(f"Making POST request to {url}")
-            response = requests.post(url, data=data, headers=headers)
-            response.raise_for_status()
-            token_data = response.json()
-            access_token = token_data.get("access_token")
-            if not access_token:
-                self.logger.error(f"Access token not found in response: {token_data}")
-                return None
-            self.logger.info("Successfully retrieved access token")
-            # Correct way to shut down Flask development server
-            shutdown_server = request.environ.get('werkzeug.server.shutdown')
-            if shutdown_server:
-                shutdown_server()
-            return access_token
-        except requests.exceptions.RequestException as e:
-            self.logger.error(
-                f"Error getting access token: {e} - {response.status_code} - {response.text} - {traceback.format_exc()}")
-            return None
-        except Exception as e:
-            self.logger.error(f"An unexpected error in _get_access_token occurred: {e} - {traceback.format_exc()}")
-            return None
+            "client_id": self.client_id,
+            "client_secret": os.getenv("GITHUB_CLIENT_SECRET"),  # Get from the env
+            "code": code,
+            "redirect_uri": self.redirect_uri
+         }
+
+        self.logger.info("Making POST request to https://github.com/login/oauth/access_token")
+
+        headers = {'Accept': 'application/json'}
+        response = requests.post(url, json=data, headers=headers)
+        response.raise_for_status()
+        json_response = response.json()
+        if "access_token" in json_response:
+          self.logger.info("Successfully retrieved access token")
+          return json_response["access_token"]
+        else:
+           self.logger.error(f"An error has occurred: {json_response}")
+           return None
 
     def set_on_auth_success(self, callback):
-        self.on_auth_success = callback
-
-    def get_access_token(self):
-        return self.access_token
+         """Sets the callback function to be executed upon successful authentication."""
+         self.on_auth_success = callback

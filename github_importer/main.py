@@ -7,8 +7,7 @@ from github_importer.import_export.import_gui import ImportGUI
 from github_importer.gui.main_window import MainWindow
 from github_importer.utils.logger import Logger
 import requests
-
-
+from tkinter import messagebox
 def main():
     # --- Setup ---
     logger = Logger("github_importer")
@@ -16,31 +15,25 @@ def main():
     logger.info(f"Configuration loaded: {config}")
 
     auth_manager = AuthManager(config, logger)
-    github_client = None  # Access token will be set after authentication
+    github_client = None
     data_importer = None
 
     # --- GUI Setup ---
     root = None
 
-    def create_gui():
-        nonlocal root, github_client, data_importer
-        root = MainWindow(None, None, None, logger)
-        auth_gui = AuthGUI(root.root, auth_manager, root.status_label)
 
-        # Set the initial access token to the AuthManager, then set github_client and data_importer
-        def set_token_and_client(access_token):
-            if not hasattr(set_token_and_client, 'called'):
-                logger.info("Setting access token")
-                set_token_and_client.called = True
+    def setup_after_auth(access_token):
+        nonlocal github_client, data_importer, root
+
+        github_client = GitHubClient(access_token, logger)
+        status_code = github_client.check_access_token()
+        if 200 <= status_code <= 299:
                 logger.info(f"Access token retrieved: {access_token}")
-                github_client = GitHubClient(access_token, logger)
                 logger.info(f"Github Client set: {github_client}")
                 data_importer = DataImporter(github_client, logger)
-                import_gui = ImportGUI(root.root, data_importer, root.status_label, root.repo_selection,
-                                       root.repo_selection)  # Added root.repo_selection
+                import_gui = ImportGUI(root.root, data_importer, github_client, logger, root.status_label, root.repo_selection)
                 root.github_client = github_client
                 root.import_gui = import_gui
-
                 url = "https://api.github.com/user"
                 headers = {
                     "Authorization": f"token {access_token}",
@@ -56,10 +49,26 @@ def main():
 
                 root.update_repo_dropdown()
 
-        auth_manager.set_on_auth_success(set_token_and_client)  # pass in the function directly
+        else:
+            logger.error(f"Invalid Access Token: Status code: {status_code}")
+            messagebox.showerror("Error", "Invalid access token. Please try again.")
 
+
+    def set_token_and_client(access_token):
+        if not hasattr(set_token_and_client, 'called'):
+            logger.info("Setting access token")
+            set_token_and_client.called = True
+            setup_after_auth(access_token)
+
+
+
+
+    def create_gui():
+        nonlocal root, github_client, data_importer
+        root = MainWindow(None, None, None, logger)
+        auth_gui = AuthGUI(root.root, auth_manager, root.status_label)
+        auth_manager.set_on_auth_success(set_token_and_client)
         root.auth_gui = auth_gui
-
         root.run()
 
     create_gui()

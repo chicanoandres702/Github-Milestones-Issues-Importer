@@ -1,57 +1,92 @@
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, messagebox, filedialog
+from datetime import datetime
 
 
 class ImportGUI:
-    """GUI components for importing data."""
-
-    def __init__(self, root, data_importer, status_label, repo_owner_entry, repo_name_entry):
+    def __init__(self, root, data_importer, github_client, logger, status_label, repo_dropdown):
         self.root = root
         self.data_importer = data_importer
+        self.logger = logger
         self.status_label = status_label
-        self.repo_owner_entry = repo_owner_entry
-        self.repo_name_entry = repo_name_entry
-        self.import_file_entry = None  # Added to make it accessible in `browse_file` method
+        self.repo_dropdown = repo_dropdown
+        self.github_client = github_client
+        self.import_file_path = None
 
-        import_file_frame = ttk.LabelFrame(root, text="Import File")
-        import_file_frame.pack(padx=20, pady=10, fill="x")
+        # UI elements
+        self.import_button = ttk.Button(self.root, text="Import Milestones", command=self.open_file_dialog)
+        self.import_button.pack(pady=10)
 
-        import_file_label = ttk.Label(import_file_frame, text="Import File:")
-        import_file_label.grid(row=0, column=0, sticky=tk.E, padx=5, pady=5)
+        self.export_button = ttk.Button(self.root, text="Export Milestones", command=self.export_milestones)
+        self.export_button.pack(pady=10)
 
-        self.import_file_entry = ttk.Entry(import_file_frame)
-        self.import_file_entry.grid(row=0, column=1, sticky=tk.W, padx=5, pady=5)
+        self.browse_button = ttk.Button(self.root, text="Browse", command=self.open_file_dialog)
+        self.browse_button.pack(pady=10)
 
-        import_file_button = ttk.Button(import_file_frame, text="Browse", command=self.browse_file)
-        import_file_button.grid(row=0, column=2, padx=5, pady=5)
+    def open_file_dialog(self):
+        self.import_file_path = filedialog.askopenfilename(title="Select Milestone File",
+                                                           filetypes=(("JSON files", "*.json"), ("all files", "*.*")))
+        if not self.import_file_path:
+            return
+        self.import_milestones()
 
-        import_button = ttk.Button(root, text="Import Data", command=self.import_data)
-        import_button.pack(pady=10)
+    def import_milestones(self):
+        if not self.import_file_path:
+            return
+        repo_string = self.repo_dropdown.get()
+        repo_string = repo_string.strip()  # remove white space
+        if not repo_string:
+            messagebox.showerror("Error", "Please select a repository.")
+            return
 
-    def browse_file(self):
-        """Opens a file dialog to select the JSON file."""
-        filepath = filedialog.askopenfilename(
-            initialdir="/",
-            title="Select file",
-            filetypes=(("JSON files", "*.json"), ("all files", "*.*"))
-        )
-        self.import_file_entry.delete(0, tk.END)
-        self.import_file_entry.insert(0, filepath)
+        if "/" not in repo_string:
+            messagebox.showerror("Error", "Invalid format for repository. Must be owner/repo.")
+            return
 
-    def import_data(self):
-        """Handles the import data button click."""
-        self.status_label.config(text="Starting import process...", foreground="black")
-        repo_owner = self.repo_owner_entry.get()
-        repo_name = self.repo_name_entry.get()
-        import_file = self.import_file_entry.get()
         try:
-            if not all([repo_owner, repo_name, import_file]):
-                self.status_label.config(text="Error: Please provide all repo information and import file!",
-                                         foreground="red")
-                return
-            if self.data_importer.import_data(repo_owner, repo_name, import_file):
-                self.status_label.config(text="Import successful!", foreground="green")
-            else:
-                self.status_label.config(text="Import failed (see log for more info)", foreground="red")
+            repo_owner, repo_name = repo_string.split("/")
+        except ValueError as e:
+            messagebox.showerror("Error", f"An error has occurred processing the selected repository: {e}")
+            return
+        start_time = datetime.now()
+        self.update_status("Importing milestones...")
+        try:
+            self.data_importer.import_milestones(self.import_file_path, repo_owner, repo_name)
+            end_time = datetime.now()
+            self.update_status(f"Milestones imported successfully in {end_time - start_time}!")
         except Exception as e:
-            self.status_label.config(text=f"An error occurred: {e}", foreground="red")
+            self.update_status(f"Error importing milestones: {e}")
+            self.logger.error(f"Error importing milestones: {e}")
+            messagebox.showerror("Error", f"An error has occurred importing milestones: {e}")
+
+    def export_milestones(self):
+        repo_string = self.repo_dropdown.get()
+        repo_string = repo_string.strip()  # remove white space
+        if not repo_string:
+            messagebox.showerror("Error", "Please select a repository.")
+            return
+
+        if "/" not in repo_string:
+            messagebox.showerror("Error", "Invalid format for repository. Must be owner/repo.")
+            return
+
+        try:
+            repo_owner, repo_name = repo_string.split("/")
+        except ValueError as e:
+            messagebox.showerror("Error", f"An error has occurred processing the selected repository: {e}")
+            return
+
+        start_time = datetime.now()
+        self.update_status("Exporting milestones...")
+        try:
+            self.data_importer.export_milestones(repo_owner, repo_name)
+            end_time = datetime.now()
+            self.update_status(f"Milestones exported successfully in {end_time - start_time}!")
+        except Exception as e:
+            self.update_status(f"Error exporting milestones: {e}")
+            self.logger.error(f"Error exporting milestones: {e}")
+            messagebox.showerror("Error", f"An error has occurred exporting milestones: {e}")
+
+    def update_status(self, message):
+        self.status_label.config(text=message)
+        self.status_label.update()

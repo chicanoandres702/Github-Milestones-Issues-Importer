@@ -1,25 +1,16 @@
 import tkinter as tk
 from tkinter import ttk
-
 class AuthGUI:
-    """GUI components for GitHub authorization."""
-
     def __init__(self, root, auth_manager, status_label):
         self.root = root
         self.auth_manager = auth_manager
         self.status_label = status_label
+        self.auth_button = ttk.Button(self.root, text="Authorize with GitHub", command=self.start_auth)
+        self.auth_button.pack(pady=10)
 
-        auth_frame = ttk.LabelFrame(root, text="Authorization")
-        auth_frame.pack(padx=20, pady=20, fill="x")
-
-        auth_button = ttk.Button(auth_frame, text="Authorize with GitHub", command=self.authorize)
-        auth_button.pack(pady=10)
-
-    def authorize(self):
-        """Handles the authorization button click."""
-        self.status_label.config(text="Starting authorization process...", foreground="black")
-        try:
-            self.auth_manager.authorize_github()
-            self.status_label.config(text="Authorization successful! (Token retrieved in background)", foreground="green")
-        except Exception as e:
-          self.status_label.config(text=f"Authorization failed: {e}", foreground="red")
+    def start_auth(self):
+        self.update_status("Authorizing...")
+        self.auth_manager.start_oauth_flow()
+    def update_status(self, message):
+       self.status_label.config(text=message)
+       self.status_label.update()
