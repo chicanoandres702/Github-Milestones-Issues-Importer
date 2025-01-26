@@ -24,6 +24,20 @@ class GitHubClient:
             self.logger.error(f"API Error: {response.status_code} - {e} - {response.text}")
             return None
 
+    def get_user_repositories(self):
+        """Fetches a list of repositories for the authenticated user."""
+        url = f"{self.base_url}/user/repos"
+        self.logger.info(f"Making request to: {url} with token {self.access_token[:10]}...")
+        response = requests.get(url, headers=self.headers)
+        try:
+            response.raise_for_status()
+            self.logger.info("Successfully retrieved user repositories!")
+            self.logger.info(f"Raw response: {response.text}")  # Log the raw response here
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"API Error: {response.status_code} - {e} - {response.text}")
+            return None
+
     def create_milestone(self, repo_owner, repo_name, milestone_data):
         """Creates a milestone in the repository."""
         url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/milestones"
