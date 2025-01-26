@@ -56,7 +56,7 @@ class GitHubClient:
             else:
                 self.logger.error("Unable to refresh access token, please login again.")
             self.request_count = 0  # Reset the counter
-        self._sleep()  # Add a delay between requests to avoid hitting the rate limit
+        # self._sleep()  # Add a delay between requests to avoid hitting the rate limit
 
     def _make_request(self, method, url, headers, data=None):
         self._before_request()
@@ -152,7 +152,10 @@ class GitHubClient:
         if response:
             if self._handle_rate_limit(response):
                 response = self._make_request("DELETE", url, self.headers)
-            self.logger.info(f"Successfully deleted issue with id: {issue_number}")
+            if response.status_code == 404:
+                self.logger.warning(f"Issue with id {issue_number} not found.")
+            else:
+                self.logger.info(f"Successfully deleted issue with id: {issue_number}")
             return response.status_code
         else:
             return None
@@ -198,3 +201,61 @@ class GitHubClient:
             return response.json()
         else:
             return None
+
+    def delete_all_issues(self, repo_owner, repo_name):
+        """
+        Deletes all issues in the specified repository using the GitHub GraphQL API.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+        }
+
+        # GraphQL query to get all issues
+        query = """
+        query($repoOwner: String!, $repoName: String!) {
+            repository(owner: $repoOwner, name: $repoName) {
+                issues(last: 100) {
+                    nodes {
+                        id
+                        number
+                    }
+                }
+            }
+        }
+        """
+
+        # GraphQL mutation to delete an issue
+        mutation = """
+        mutation($issueId: ID!) {
+            deleteIssue(input: {issueId: $issueId}) {
+                clientMutationId
+            }
+        }
+        """
+
+        # Function to execute a GraphQL query
+        def graphql_query(query, variables):
+            response = requests.post(
+                'https://api.github.com/graphql',
+                json={'query': query, 'variables': variables},
+                headers=headers
+            )
+            response.raise_for_status()
+            return response.json()
+
+        # Get all issues
+        variables = {"repoOwner": repo_owner, "repoName": repo_name}
+        result = graphql_query(query, variables)
+        issues = result['data']['repository']['issues']['nodes']
+
+        # Delete each issue
+        for issue in issues:
+            issue_id = issue['id']
+            self.logger.info(f"Deleting issue: {issue_id}")
+            variables = {"issueId": issue_id}
+            try:
+                graphql_query(mutation, variables)
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"Failed to delete issue {issue_id}: {e}")
