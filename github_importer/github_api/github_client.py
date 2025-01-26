@@ -14,6 +14,19 @@ class GitHubClient:
         }
         self.request_count = 0  # Track how many API requests have been made
 
+    def _before_request(self):
+        self.request_count += 1
+        if self.request_count > 15:
+            self.logger.info("More than 15 requests have been made, attempting to refresh the token.")
+            if self.auth_manager.refresh_access_token():
+                self.logger.info("Successfully refreshed token.")
+                self.headers["Authorization"] = f"token {self.auth_manager.access_token}"
+            else:
+                self.logger.error("Unable to refresh access token, please login again.")
+            self.request_count = 0  # Reset the counter
+        self._sleep()  # Add a delay between requests to avoid hitting the rate limit
+
+    # Other methods remain unchanged
     def _log_request(self, method, url, headers, data=None):
         log_message = f"Making {method} request to: {url}\n"
         log_message += f"Headers: {headers}\n"
@@ -45,18 +58,6 @@ class GitHubClient:
         else:
             self.logger.error("Unable to refresh the access token. Please log in again.")
             return None
-
-    def _before_request(self):
-        self.request_count += 1
-        if self.request_count > 15:
-            self.logger.info("More than 15 requests have been made, attempting to refresh the token.")
-            if self.auth_manager.refresh_access_token():
-                self.logger.info("Successfully refreshed token.")
-                self.headers["Authorization"] = f"token {self.auth_manager.access_token}"
-            else:
-                self.logger.error("Unable to refresh access token, please login again.")
-            self.request_count = 0  # Reset the counter
-        # self._sleep()  # Add a delay between requests to avoid hitting the rate limit
 
     def _make_request(self, method, url, headers, data=None):
         self._before_request()
