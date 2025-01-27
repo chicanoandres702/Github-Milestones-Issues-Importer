@@ -1,4 +1,5 @@
 import requests
+import time
 from github_importer.utils.logger import Logger
 
 class GitHubClient:
@@ -11,11 +12,20 @@ class GitHubClient:
             "Authorization": f"token {self.access_token}",
             "Accept": "application/vnd.github.v3+json"
         }
+        self.request_count = 0  # Counter for requests
+        self.refresh_threshold = 15 # Number of requests before token refresh
 
     def _log_request(self, method, url, headers, data=None):
         self.logger.info(f"Request: {method} {url} Headers: {headers} Data: {data}")
 
     def _make_request(self, method, url, headers, data=None):
+        #Increment the request counter
+        self.request_count += 1
+        #Check if its time to refresh the token
+        if self.request_count >= self.refresh_threshold:
+            self._refresh_token()
+            self.request_count = 0
+            self.headers["Authorization"] = f"token {self.auth_manager.access_token}"
         try:
             if method == "POST":
                 response = requests.post(url, headers=headers, json=data)
@@ -39,37 +49,28 @@ class GitHubClient:
         return False
 
     def _sleep(self):
-        time.sleep(1)
+        time.sleep(2)
 
-    def create_temporary_milestone(self, repo_owner, repo_name):
-        """Creates a temporary milestone to associate issues if none can be found"""
-        milestone_data = {
-            "title": "Temporary Milestone For Import",
-            "state": "open",
-            "description": "This milestone is used as a container to import issues from the json file"
-        }
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
-        self._log_request("POST", url, self.headers, milestone_data)
-        response = self._make_request("POST", url, self.headers, milestone_data)
-
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, milestone_data)
-            self.logger.info(f"Successfully created temporary milestone")
-            return response.json()
+    def _refresh_token(self):
+        """Refreshes the access token using the auth_manager"""
+        self.logger.info("Attempting to refresh access token...")
+        if self.auth_manager.refresh_access_token():
+            self.access_token = self.auth_manager.access_token  # Update token
+            self.headers["Authorization"] = f"token {self.access_token}"
+            self.logger.info("Access token refreshed successfully.")
         else:
-            return None
-
-
+            self.logger.error("Failed to refresh access token.")
     def get_user_info(self):
         """Retrieves the authenticated user's information."""
         url = f"{self.base_url}/user"
         try:
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            data = response.json()
-            self.logger.info(f"Successfully retrieved User info: {data}")
-            return data
+            response = self._make_request("GET",url, self.headers)
+            if response:
+                data = response.json()
+                self.logger.info(f"Successfully retrieved User info: {data}")
+                return data
+            else:
+                return None
         except Exception as e:
             self.logger.error(f"An error has occurred getting user info: {e}")
             return None
@@ -78,10 +79,12 @@ class GitHubClient:
         """Authenticates with the GitHub API using the stored access token."""
         url = f"{self.base_url}/user"
         try:
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()  # Raise an exception for bad status codes
-            self.logger.info("Successfully authenticated with GitHub API.")
-            return True
+            response = self._make_request("GET",url, self.headers)
+            if response:
+                self.logger.info("Successfully authenticated with GitHub API.")
+                return True
+            else:
+                return False
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to authenticate with GitHub API: {e}")
             # If authentication fails due to invalid token, try refreshing
@@ -98,8 +101,11 @@ class GitHubClient:
     def check_access_token(self):
         url = f"{self.base_url}/user"
         try:
-            response = requests.get(url, headers=self.headers)
-            return response.status_code
+            response = self._make_request("GET",url,self.headers)
+            if response:
+                return response.status_code
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to check access token: {e}")
             return None
@@ -107,11 +113,13 @@ class GitHubClient:
     def get_user_repos(self):
         """Fetches the authenticated user's repositories."""
         try:
-            response = requests.get(f"{self.base_url}/user/repos", headers=self.headers)
-            response.raise_for_status()
-            repos = response.json()
-            self.logger.info(f"Successfully fetched user repositories: {repos}")
-            return repos
+            response = self._make_request("GET",f"{self.base_url}/user/repos", self.headers)
+            if response:
+                repos = response.json()
+                self.logger.info(f"Successfully fetched user repositories: {repos}")
+                return repos
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to fetch user repositories: {e}")
             return None
@@ -120,11 +128,13 @@ class GitHubClient:
         """Fetches the contents of a repository at the specified path."""
         try:
             url = f"{self.base_url}/repos/{repo_name}/contents/{path}"
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            contents = response.json()
-            self.logger.info(f"Successfully fetched repository contents for {repo_name}/{path}: {contents}")
-            return contents
+            response = self._make_request("GET", url, self.headers)
+            if response:
+                contents = response.json()
+                self.logger.info(f"Successfully fetched repository contents for {repo_name}/{path}: {contents}")
+                return contents
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to fetch repository contents for {repo_name}/{path}: {e}")
             return None
@@ -138,11 +148,13 @@ class GitHubClient:
                 "description": description,
                 "private": False  # You can change this to True for private repos
             }
-            response = requests.post(url, headers=self.headers, json=data)
-            response.raise_for_status()
-            repo = response.json()
-            self.logger.info(f"Successfully created repository: {repo}")
-            return repo
+            response = self._make_request("POST",url, self.headers, data)
+            if response:
+                repo = response.json()
+                self.logger.info(f"Successfully created repository: {repo}")
+                return repo
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to create repository: {e}")
             return None
@@ -155,11 +167,13 @@ class GitHubClient:
                 "message": message,
                 "content": content
             }
-            response = requests.put(url, headers=self.headers, json=data)
-            response.raise_for_status()
-            file_info = response.json()
-            self.logger.info(f"Successfully created file {path} in {repo_name}: {file_info}")
-            return file_info
+            response = self._make_request("PUT", url, self.headers, data)
+            if response:
+                file_info = response.json()
+                self.logger.info(f"Successfully created file {path} in {repo_name}: {file_info}")
+                return file_info
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to create file {path} in {repo_name}: {e}")
             return None
@@ -173,11 +187,13 @@ class GitHubClient:
                 "content": content,
                 "sha": sha
             }
-            response = requests.put(url, headers=self.headers, json=data)
-            response.raise_for_status()
-            file_info = response.json()
-            self.logger.info(f"Successfully updated file {path} in {repo_name}: {file_info}")
-            return file_info
+            response = self._make_request("PUT", url, self.headers, data)
+            if response:
+                file_info = response.json()
+                self.logger.info(f"Successfully updated file {path} in {repo_name}: {file_info}")
+                return file_info
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to update file {path} in {repo_name}: {e}")
             return None
@@ -190,9 +206,11 @@ class GitHubClient:
                 "message": message,
                 "sha": sha
             }
-            response = requests.delete(url, headers=self.headers, json=data)
-            response.raise_for_status()
-            self.logger.info(f"Successfully deleted file {path} from {repo_name}")
+            response = self._make_request("DELETE", url, self.headers, data)
+            if response:
+                self.logger.info(f"Successfully deleted file {path} from {repo_name}")
+            else:
+                return None
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to delete file {path} from {repo_name}: {e}")
 
@@ -200,11 +218,7 @@ class GitHubClient:
         url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
         self._log_request("POST", url, self.headers, milestone_data)
         response = self._make_request("POST", url, self.headers, milestone_data)
-
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, milestone_data)
-
             if response.status_code == 201:
                 self.logger.info(f"Successfully created milestone: {milestone_data['title']}")
                 return response.json()
@@ -220,8 +234,6 @@ class GitHubClient:
         self._log_request("POST", url, self.headers, issue_data)
         response = self._make_request("POST", url, self.headers, issue_data)
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, issue_data)
             self._sleep()
             self.logger.info(f"Successfully created issue: {issue_data['title']}")
             return response.json()
@@ -233,13 +245,11 @@ class GitHubClient:
         self._log_request("DELETE", url, self.headers)
         response = self._make_request("DELETE", url, self.headers)
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("DELETE", url, self.headers)
-            if response.status_code == 404:
+             if response.status_code == 404:
                 self.logger.warning(f"Issue with id {issue_number} not found.")
-            else:
+             else:
                 self.logger.info(f"Successfully deleted issue with id: {issue_number}")
-            return response.status_code
+             return response.status_code
         else:
             return None
 
@@ -248,8 +258,6 @@ class GitHubClient:
         self._log_request("DELETE", url, self.headers)
         response = self._make_request("DELETE", url, self.headers)
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("DELETE", url, self.headers)
             self.logger.info(f"Successfully deleted milestone: {milestone_number}")
             return response.status_code
         else:
@@ -260,8 +268,6 @@ class GitHubClient:
         self._log_request("GET", url, self.headers)
         response = self._make_request("GET", url, self.headers)
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("GET", url, self.headers)
             return response.json()
         else:
             return None
@@ -276,10 +282,7 @@ class GitHubClient:
         url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
         self._log_request("POST", url, self.headers, milestone_data)
         response = self._make_request("POST", url, self.headers, milestone_data)
-
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, milestone_data)
             self.logger.info(f"Successfully created temporary milestone")
             return response.json()
         else:
