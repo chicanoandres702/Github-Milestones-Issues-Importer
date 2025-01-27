@@ -11,6 +11,12 @@ class Logger:
       ch.setFormatter(formatter)
       self.logger.addHandler(ch)
 
+    def set_handler(self, handler):
+        self.handler = handler
+
+    def addHandler(self, handler):
+        self.set_handler(handler)
+        return self
 
     def info(self, message):
         self.logger.info(message)
