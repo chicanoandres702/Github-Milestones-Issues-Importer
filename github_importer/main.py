@@ -1,4 +1,4 @@
-# In `github_importer/main.py`
+# github_importer/main.py
 from github_importer.config.config import Config
 from github_importer.auth.auth_manager import AuthManager
 from github_importer.auth.auth_gui import AuthGUI
@@ -29,8 +29,9 @@ def main():
         nonlocal github_client, data_importer, root
 
         github_client = GitHubClient(access_token, logger, auth_manager)
-        status_code = github_client.check_access_token()
-        if 200 <= status_code <= 299:
+
+        # Authenticate with the GitHub API
+        if github_client.authenticate():
             logger.info(f"Access token retrieved: {access_token}")
             logger.info(f"Github Client set: {github_client}")
             data_importer = DataImporter(github_client, logger)
@@ -57,8 +58,8 @@ def main():
             root.run()  # Start the Tkinter main loop
 
         else:
-            logger.error(f"Invalid Access Token: Status code: {status_code}")
-            messagebox.showerror("Error", "Invalid access token. Please try again.")
+            logger.error("Failed to authenticate with GitHub API.")
+            messagebox.showerror("Error", "Authentication failed. Please try again.")
 
     def set_token_and_client(access_token):
         if not hasattr(set_token_and_client, 'called'):
@@ -77,10 +78,12 @@ def main():
             logger.info("Successfully refreshed token.")
             set_token_and_client(auth_manager.access_token)
         else:
-            logger.error("Failed to refresh token. Please login again.")
+            logger.error("Failed to refresh token. Starting auth flow.")
+            auth_manager.start_oauth_flow()  # Start auth flow if refresh fails
             root.run()
     else:
-        logger.error("No old token found. Please login.")
+        logger.error("No old token found. Starting auth flow.")
+        auth_manager.start_oauth_flow()  # Start auth flow if no token is stored
         root.run()
 
 if __name__ == "__main__":
