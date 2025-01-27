@@ -22,7 +22,7 @@ def main():
 
     # --- GUI Setup ---
     root = MainWindow(None, None, None, logger)
-    auth_gui = AuthGUI(root.root, auth_manager, root.status_label)
+    auth_gui = AuthGUI(root.root, auth_manager, root.status_interface)
     root.auth_gui = auth_gui
 
     def setup_after_auth(access_token):
@@ -34,7 +34,7 @@ def main():
             logger.info(f"Access token retrieved: {access_token}")
             logger.info(f"Github Client set: {github_client}")
             data_importer = DataImporter(github_client, logger)
-            import_gui = ImportGUI(root.root, data_importer, github_client, logger, root.status_label, root.repo_selection)
+            import_gui = ImportGUI(root.root, data_importer, github_client, logger, root.status_interface, root.repo_selection)
             root.github_client = github_client
             root.import_gui = import_gui
             url = "https://api.github.com/user"
