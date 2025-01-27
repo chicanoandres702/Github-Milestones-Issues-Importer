@@ -9,8 +9,8 @@ class AuthGUI:
         self.auth_button.pack(pady=10)
 
     def start_auth(self):
-        self.update_status("Authorizing...")
+        # self.update_status("Authorizing...")
         self.auth_manager.start_oauth_flow()
     def update_status(self, message):
-       self.status_label.config(text=message)
+       self.status_label.configure(text=message)
        self.status_label.update()

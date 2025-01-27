@@ -10,6 +10,8 @@ from github_importer.utils.logger import Logger
 import requests
 from tkinter import messagebox
 
+# main function
+# main function
 def main():
     # --- Setup ---
     logger = Logger("github_importer")

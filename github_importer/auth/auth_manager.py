@@ -104,7 +104,7 @@ class AuthManager:
 
     def set_on_auth_success(self, callback):
         """Sets the callback function to be executed upon successful authentication."""
-        self.on_auth_success = callback
+        self.on_auth_success = callback(self.access_token)
 
     def refresh_access_token(self):
         """

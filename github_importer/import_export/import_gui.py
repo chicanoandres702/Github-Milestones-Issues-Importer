@@ -56,7 +56,8 @@ class ImportGUI:
         self.import_file_path = filedialog.askopenfilename(title="Select Milestone File", filetypes=(("JSON files", "*.json"), ("all files", "*.*")))
         if not self.import_file_path:
            return
-        self.import_milestones()
+        return self.import_milestones()
+        # self.import_milestones()
 
     def import_milestones(self):
         if not self.import_file_path:
@@ -116,5 +117,5 @@ class ImportGUI:
             messagebox.showerror("Error", f"An error has occurred exporting milestones: {e}")
 
     def update_status(self, message):
-        self.status_label.config(text=message)
-        self.status_label.update()
+        # self.status_label.config(text=message)
+        self.status_label.update(message)
