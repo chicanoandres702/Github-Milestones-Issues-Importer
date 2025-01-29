@@ -1,135 +1,123 @@
 import requests
-import json
+from typing import List, Dict, Any, Optional, Callable
 import time
+import logging
+import threading
+from queue import Queue
+
 
 class GitHubClient:
-    def __init__(self, access_token, logger, auth_manager):
-        self.access_token = access_token
+    """
+    Comprehensive GitHub API client supporting both REST and GraphQL interactions.
+
+    Attributes:
+        token (str): GitHub API authentication token
+        logger (logging.Logger): Logger for tracking API interactions
+        base_url (str): Base URL for GitHub REST API
+        graphql_url (str): URL for GitHub GraphQL API
+    """
+
+    def __init__(self, token: str, logger: logging.Logger, auth_manager: Any):
+        """
+        Initialize the GitHub client.
+
+        Args:
+            token: GitHub API token
+            logger: Logger instance
+            auth_manager: Authentication manager
+        """
+        self.token = token
         self.logger = logger
         self.auth_manager = auth_manager
-        self.headers = {
-            "Authorization": f"token {self.access_token}",
-            "Accept": "application/vnd.github.v3+json",
-            "X-GitHub-Api-Version": "2022-11-28"
-        }
-        self.request_count = 0  # Track how many API requests have been made
-
-    def _before_request(self):
-        self.request_count += 1
-        if self.request_count > 15:
-            self.logger.info("More than 15 requests have been made, attempting to refresh the token.")
-            if self.auth_manager.refresh_access_token():
-                self.logger.info("Successfully refreshed token.")
-                self.headers["Authorization"] = f"token {self.auth_manager.access_token}"
-            else:
-                self.logger.error("Unable to refresh access token, please login again.")
-            self.request_count = 0  # Reset the counter
-        self._sleep()  # Add a delay between requests to avoid hitting the rate limit
-
-    # Other methods remain unchanged
-    def _log_request(self, method, url, headers, data=None):
-        log_message = f"Making {method} request to: {url}\n"
-        log_message += f"Headers: {headers}\n"
-        if data:
-            log_message += f"Data: {json.dumps(data, indent=2)}\n"
-        self.logger.info(log_message)
-
-    def _handle_rate_limit(self, response):
-        remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
-        reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
-        retry_after = int(response.headers.get('Retry-After', 0))
-        self.logger.info(f"Rate Limit Remaining: {remaining}")
-        if remaining == 0 or retry_after > 0:
-            wait_time = max(retry_after, reset_time - int(time.time()))
-            self.logger.warning(f"Rate limit exceeded. Waiting {wait_time} seconds before retrying.")
-            time.sleep(wait_time)
-            return True
-        return False
+        self.base_url = "https://api.github.com"
+        self.graphql_url = "https://api.github.com/graphql"
+        self.headers = self._get_headers()
+        self.rate_limit_remaining = None
+        self.rate_limit_reset = None
 
     def _sleep(self):
-        time.sleep(1)
+        time.sleep(2)
 
-    def _refresh_token_and_retry(self, method, url, headers, data=None):
-        self.logger.info("Access token has likely expired, attempting to refresh the token and retrying request.")
-        if self.auth_manager.refresh_access_token():
-            headers["Authorization"] = f"token {self.auth_manager.access_token}"
-            self.headers["Authorization"] = f"token {self.auth_manager.access_token}"
-            return self._make_request(method, url, headers, data)
-        else:
-            self.logger.error("Unable to refresh the access token. Please log in again.")
-            return None
+    def _get_headers(self) -> Dict[str, str]:
+        """
+        Generate headers for API requests.
 
-    def _make_request(self, method, url, headers, data=None):
-        self._before_request()
+        Returns:
+            Dict of headers including authorization
+        """
+        return {
+            "Authorization": f"token {self.token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+
+    def _graphql_headers(self) -> Dict[str, str]:
+        """
+        Generate headers for GraphQL requests.
+
+        Returns:
+            Dict of headers including authorization and content type
+        """
+        return {
+            "Authorization": f"bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+
+    def _handle_rate_limit(self, response: requests.Response) -> None:
+        """
+        Update and handle GitHub API rate limits.
+
+        Args:
+            response: API response
+        """
+        self.rate_limit_remaining = int(response.headers.get('X-RateLimit-Remaining', 0))
+        self.rate_limit_reset = int(response.headers.get('X-RateLimit-Reset', 0))
+
+        if self.rate_limit_remaining < 10:
+            wait_time = max(self.rate_limit_reset - time.time(), 0)
+            self.logger.warning(f"Rate limit low. Waiting {wait_time} seconds.")
+            time.sleep(wait_time)
+
+    def _log_request(self, method, url, headers, data=None):
+        self.logger.info(f"Request: {method} {url} Headers: {headers} Data: {data}")
+
+    def _make_request(self, method: str, url: str, params: Dict = None, json: Dict = None,
+                      **kwargs) -> requests.Response:
+        """
+        Make a generic API request with error handling.
+
+        Args:
+            method: HTTP method
+            url: Request URL
+            params: Query parameters for the request
+            json: JSON body for the request
+            **kwargs: Additional request parameters
+
+        Returns:
+            API response
+        """
         try:
-            if method == "GET":
-                response = requests.get(url, headers=headers)
-            elif method == "POST":
-                response = requests.post(url, headers=headers, json=data)
-            elif method == "DELETE":
-                response = requests.delete(url, headers=headers)
-            else:
-                self.logger.error(f"Invalid HTTP method: {method}")
-                return None
-
-            if response.status_code == 403 and 'X-RateLimit-Remaining' in response.headers:
-                if self._handle_rate_limit(response):
-                    return self._make_request(method, url, headers, data)
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=self.headers,
+                params=params,
+                json=json,
+                **kwargs
+            )
+            self._handle_rate_limit(response)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Request failed: {e}")
-            return None
+            self.logger.error(f"API Request Error: {e}")
+            raise
 
-    def check_access_token(self):
-        """
-        Checks the validity of the access token.
-
-        Returns:
-            int: HTTP status code of the user API request.
-        """
-        url = "https://api.github.com/user"
-        self._log_request("GET", url, self.headers)
-        response = self._make_request("GET", url, self.headers)
-
+    def delete_milestone(self, repo_owner, repo_name, milestone_number):
+        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones/{milestone_number}"
+        self._log_request("DELETE", url, self.headers)
+        response = self._make_request("DELETE", url, self.headers)
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("GET", url, self.headers)
+            self.logger.info(f"Successfully deleted milestone: {milestone_number}")
             return response.status_code
-        else:
-            return None
-
-    def get_user_repos(self):
-        url = "https://api.github.com/user/repos"
-        self._log_request("GET", url, self.headers)
-        response = self._make_request("GET", url, self.headers)
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("GET", url, self.headers)
-            return response.json()
-        else:
-            return None
-
-    def get_milestones(self, repo_owner, repo_name):
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
-        self._log_request("GET", url, self.headers)
-        response = self._make_request("GET", url, self.headers)
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("GET", url, self.headers)
-            return response.json()
-        else:
-            return None
-
-    def create_milestone(self, repo_owner, repo_name, milestone_data):
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
-        self._log_request("POST", url, self.headers, milestone_data)
-        response = self._make_request("POST", url, self.headers, milestone_data)
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, milestone_data)
-            self.logger.info(f"Successfully created milestone: {milestone_data['title']}")
-            return response.json()
         else:
             return None
 
@@ -138,125 +126,385 @@ class GitHubClient:
         self._log_request("POST", url, self.headers, issue_data)
         response = self._make_request("POST", url, self.headers, issue_data)
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, issue_data)
-            self._sleep()
-            self.logger.info(f"Successfully created issue: {issue_data['title']}")
-            return response.json()
-        else:
-            return None
-
-    def delete_issue(self, repo_owner, repo_name, issue_number):
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues/{issue_number}"
-        self._log_request("DELETE", url, self.headers)
-        response = self._make_request("DELETE", url, self.headers)
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("DELETE", url, self.headers)
-            if response.status_code == 404:
-                self.logger.warning(f"Issue with id {issue_number} not found.")
+            if response.status_code == 201:
+                self.logger.info(f"Successfully created issue: {issue_data['title']}")
+                return response.json()
             else:
-                self.logger.info(f"Successfully deleted issue with id: {issue_number}")
-            return response.status_code
+                self.logger.error(f"Failed to create issue: {response.status_code} - {response.text}")
+                return None
         else:
+            self.logger.error("No response received from the GitHub API.")
             return None
 
-    def delete_milestone(self, repo_owner, repo_name, milestone_number):
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones/{milestone_number}"
-        self._log_request("DELETE", url, self.headers)
-        response = self._make_request("DELETE", url, self.headers)
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("DELETE", url, self.headers)
-            self.logger.info(f"Successfully deleted milestone: {milestone_number}")
-            return response.status_code
-        else:
-            return None
 
-    def get_issues(self, repo_owner, repo_name):
-        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues"
-        self._log_request("GET", url, self.headers)
-        response = self._make_request("GET", url, self.headers)
-        if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("GET", url, self.headers)
-            return response.json()
-        else:
-            return None
 
-    def create_temporary_milestone(self, repo_owner, repo_name):
-        """Creates a temporary milestone to associate issues if none can be found"""
-        milestone_data = {
-            "title": "Temporary Milestone For Import",
-            "state": "open",
-            "description": "This milestone is used as a container to import issues from the json file"
-        }
+    def create_milestone(self, repo_owner, repo_name, milestone_data):
         url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
         self._log_request("POST", url, self.headers, milestone_data)
         response = self._make_request("POST", url, self.headers, milestone_data)
-
         if response:
-            if self._handle_rate_limit(response):
-                response = self._make_request("POST", url, self.headers, milestone_data)
-            self.logger.info(f"Successfully created temporary milestone")
-            return response.json()
+            if response.status_code == 201:
+                self.logger.info(f"Successfully created milestone: {milestone_data['title']}")
+                return response.json()
+            else:
+                self.logger.error(f"Failed to create milestone: {response.status_code} - {response.text}")
+                return None
         else:
+            self.logger.error("No response received from the GitHub API.")
             return None
 
-    def delete_all_issues(self, repo_owner, repo_name):
-        """
-        Deletes all issues in the specified repository using the GitHub GraphQL API.
-        """
-        headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Accept": "application/vnd.github.v3+json",
-            "X-GitHub-Api-Version": "2022-11-28"
-        }
 
-        # GraphQL query to get all issues
-        query = """
-        query($repoOwner: String!, $repoName: String!) {
-            repository(owner: $repoOwner, name: $repoName) {
-                issues(last: 100) {
-                    nodes {
-                        id
-                        number
+    def get_user_repos(self) -> List[Dict[str, Any]]:
+        """
+        Retrieve user's repositories.
+
+        Returns:
+            List of repository dictionaries
+        """
+        url = f"{self.base_url}/user/repos"
+        response = self._make_request('GET', url, params={'per_page': 100})
+        return response.json()
+
+    def get_milestones_with_issues(self, repo_owner: str, repo_name: str, state: str = "all") -> List[Dict[str, Any]]:
+        """
+        Get milestones with their associated issues.
+
+        Args:
+            repo_owner: Repository owner
+            repo_name: Repository name
+            state: Milestone state filter (all, open, closed)
+
+        Returns:
+            List of milestones with nested issues
+        """
+        try:
+            # First, get all milestones
+            milestones_url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/milestones"
+            milestones_params = {
+                "state": state,
+                "per_page": 100
+            }
+            milestones = []
+
+            # Fetch milestones with pagination
+            while milestones_url:
+                milestones_response = self._make_request('GET', milestones_url, params=milestones_params)
+                milestones.extend(milestones_response.json())
+
+                # Check for pagination
+                if 'next' in milestones_response.links:
+                    milestones_url = milestones_response.links['next']['url']
+                    milestones_params = {}  # Clear params for subsequent pages
+                else:
+                    milestones_url = None
+
+            # For each milestone, fetch its issues
+            for milestone in milestones:
+                milestone_number = milestone['number']
+                issues_url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/issues"
+                issues_params = {
+                    "milestone": milestone_number,
+                    "state": "all",
+                    "per_page": 100
+                }
+
+                milestone_issues = []
+                current_issues_url = issues_url
+
+                while current_issues_url:
+                    issues_response = self._make_request('GET', current_issues_url, params=issues_params)
+                    issues_data = issues_response.json()
+
+                    for issue in issues_data:
+                        formatted_issue = {
+                            "title": issue['title'],
+                            "number": issue['number'],
+                            "state": issue['state'],
+                            "body": issue['body'] or "",
+                            "created_at": issue['created_at'],
+                            "updated_at": issue['updated_at'],
+                            "labels": [label['name'] for label in issue['labels']],
+                            "comments_count": issue['comments']
+                        }
+
+                        if issue['comments'] > 0:
+                            comments_url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/issues/{issue['number']}/comments"
+                            comments_response = self._make_request('GET', comments_url)
+                            formatted_issue['comments'] = [
+                                {
+                                    'body': comment['body'],
+                                    'created_at': comment['created_at'],
+                                    'author': comment['user']['login']
+                                }
+                                for comment in comments_response.json()
+                            ]
+
+                        milestone_issues.append(formatted_issue)
+
+                    if 'next' in issues_response.links:
+                        current_issues_url = issues_response.links['next']['url']
+                        issues_params = {}
+                    else:
+                        current_issues_url = None
+
+                milestone['issues'] = milestone_issues
+
+            self.logger.info(f"Retrieved {len(milestones)} milestones with their issues")
+            return milestones
+
+        except Exception as e:
+            error_msg = f"Failed to retrieve milestones with issues: {str(e)}"
+            self.logger.error(error_msg)
+            raise Exception(error_msg)
+
+    def delete_all_issues(self, repo_owner: str, repo_name: str, status_callback: Optional[Callable] = None) -> threading.Thread:
+        """
+        Delete all issues in a repository using GraphQL on a separate thread.
+
+        Args:
+            repo_owner: Repository owner
+            repo_name: Repository name
+            status_callback: Callback function to update UI status
+
+        Returns:
+            Thread object handling the deletion process
+        """
+        def deletion_worker():
+            try:
+                # First, get all issue node IDs
+                query = """
+                query GetRepositoryIssues($owner: String!, $repo: String!) {
+                    repository(owner: $owner, name: $repo) {
+                        issues(first: 100, states: [OPEN, CLOSED]) {
+                            nodes {
+                                id
+                                number
+                                title
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
+                            }
+                        }
                     }
+                }
+                """
+
+                variables = {
+                    "owner": repo_owner,
+                    "repo": repo_name
+                }
+
+                # Collect all issue node IDs
+                all_issues = []
+                has_next_page = True
+                cursor = None
+
+                if status_callback:
+                    status_callback("Fetching issues...")
+
+                while has_next_page:
+                    if cursor:
+                        query = """
+                        query GetRepositoryIssues($owner: String!, $repo: String!, $cursor: String!) {
+                            repository(owner: $owner, name: $repo) {
+                                issues(first: 100, states: [OPEN, CLOSED], after: $cursor) {
+                                    nodes {
+                                        id
+                                        number
+                                        title
+                                    }
+                                    pageInfo {
+                                        hasNextPage
+                                        endCursor
+                                    }
+                                }
+                            }
+                        }
+                        """
+                        variables["cursor"] = cursor
+
+                    payload = {
+                        "query": query,
+                        "variables": variables
+                    }
+
+                    response = requests.post(
+                        self.graphql_url,
+                        headers=self._graphql_headers(),
+                        json=payload
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+
+                    if 'errors' in result:
+                        raise Exception(f"GraphQL Error: {result['errors']}")
+
+                    issues = result['data']['repository']['issues']
+                    all_issues.extend(issues['nodes'])
+
+                    has_next_page = issues['pageInfo']['hasNextPage']
+                    cursor = issues['pageInfo']['endCursor']
+
+                total_issues = len(all_issues)
+                if status_callback:
+                    status_callback(f"Found {total_issues} issues to delete")
+
+                for index, issue in enumerate(all_issues, 1):
+                    try:
+                        if status_callback:
+                            status_message = (
+                                f"Deleting issue {index}/{total_issues}: "
+                                f"#{issue['number']} - {issue['title']}"
+                            )
+                            status_callback(status_message)
+
+                        self.delete_issue_graphql(issue['id'])
+                        time.sleep(0.5)  # Rate limiting delay
+
+                    except Exception as e:
+                        error_msg = f"Error deleting issue #{issue['number']}: {str(e)}"
+                        self.logger.error(error_msg)
+                        if status_callback:
+                            status_callback(error_msg)
+
+                if status_callback:
+                    status_callback(f"Successfully deleted {total_issues} issues")
+
+            except Exception as e:
+                error_msg = f"Failed to delete issues: {str(e)}"
+                self.logger.error(error_msg)
+                if status_callback:
+                    status_callback(error_msg)
+                raise Exception(error_msg)
+
+        deletion_thread = threading.Thread(target=deletion_worker)
+        deletion_thread.daemon = True
+        deletion_thread.start()
+        return deletion_thread
+
+    def delete_issue_graphql(self, issue_node_id: str) -> Dict[str, Any]:
+        """
+        Delete an issue using GitHub GraphQL API.
+
+        Args:
+            issue_node_id: Node ID of the issue to delete
+
+        Returns:
+            GraphQL mutation response
+        """
+        query = """
+        mutation DeleteIssue($input: DeleteIssueInput!) {
+            deleteIssue(input: $input) {
+                repository {
+                    id
                 }
             }
         }
         """
 
-        # GraphQL mutation to delete an issue
-        mutation = """
-        mutation($issueId: ID!) {
-            deleteIssue(input: {issueId: $issueId}) {
-                clientMutationId
+        variables = {
+            "input": {
+                "issueId": issue_node_id
             }
         }
-        """
 
-        # Function to execute a GraphQL query
-        def graphql_query(query, variables):
+        payload = {
+            "query": query,
+            "variables": variables
+        }
+
+        try:
             response = requests.post(
-                'https://api.github.com/graphql',
-                json={'query': query, 'variables': variables},
-                headers=headers
+                self.graphql_url,
+                headers=self._graphql_headers(),
+                json=payload
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
 
-        # Get all issues
-        variables = {"repoOwner": repo_owner, "repoName": repo_name}
-        result = graphql_query(query, variables)
-        issues = result['data']['repository']['issues']['nodes']
+            if 'errors' in result:
+                raise Exception(f"GraphQL Error: {result['errors']}")
 
-        # Delete each issue
-        for issue in issues:
-            issue_id = issue['id']
-            self.logger.info(f"Deleting issue: {issue_id}")
-            variables = {"issueId": issue_id}
-            try:
-                graphql_query(mutation, variables)
-            except requests.exceptions.RequestException as e:
-                self.logger.error(f"Failed to delete issue {issue_id}: {e}")
+            return result
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"GraphQL Request Error: {e}")
+            raise
+
+    def authenticate(self) -> bool:
+        """
+        Verify authentication with GitHub API.
+
+        Returns:
+            bool: True if authentication is successful
+        """
+        try:
+            url = f"{self.base_url}/user"
+            response = self._make_request('GET', url)
+            return response.status_code == 200
+        except Exception as e:
+            self.logger.error(f"Authentication failed: {e}")
+            return False
+
+
+# Example usage with status window
+if __name__ == "__main__":
+    import tkinter as tk
+    from tkinter import ttk
+
+    class StatusWindow:
+        def __init__(self):
+            self.root = tk.Tk()
+            self.root.title("Issue Deletion Status")
+            self.root.geometry("400x150")
+
+            self.status_label = ttk.Label(self.root, text="", wraplength=380)
+            self.status_label.pack(pady=20)
+
+            self.progress = ttk.Progressbar(self.root, mode='indeterminate')
+            self.progress.pack(fill=tk.X, padx=20)
+
+        def update_status(self, message: str):
+            self.status_label.config(text=message)
+            self.root.update()
+
+        def start_deletion(self, github_client, repo_owner: str, repo_name: str):
+            self.progress.start()
+            deletion_thread = github_client.delete_all_issues(
+                repo_owner,
+                repo_name,
+                status_callback=self.update_status
+            )
+
+            def check_thread():
+                if deletion_thread.is_alive():
+                    self.root.after(100, check_thread)
+                else:
+                    self.progress.stop()
+                    self.update_status("Deletion completed!")
+
+            check_thread()
+
+        def run(self):
+            self.root.mainloop()
+
+    # Setup logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Initialize GitHub client
+    github_client = GitHubClient(
+        token="your_github_token",
+        logger=logger,
+        auth_manager=None
+    )
+
+    # Create and run status window
+    status_window = StatusWindow()
+    status_window.start_deletion(
+        github_client,
+        repo_owner="example_owner",
+        repo_name="example_repo"
+    )
+    status_window.run()

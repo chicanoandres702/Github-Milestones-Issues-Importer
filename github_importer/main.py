@@ -1,4 +1,4 @@
-# In `github_importer/main.py`
+# github_importer/main.py
 from github_importer.config.config import Config
 from github_importer.auth.auth_manager import AuthManager
 from github_importer.auth.auth_gui import AuthGUI
@@ -10,78 +10,157 @@ from github_importer.utils.logger import Logger
 import requests
 from tkinter import messagebox
 
+
+class Application:
+    def __init__(self):
+        self.logger = Logger("github_importer")
+        self.config = Config()
+        self.auth_manager = None
+        self.github_client = None
+        self.data_importer = None
+        self.root = None
+        self.auth_gui = None
+        self.setup_completed = False
+
+        self.logger.info(f"Configuration loaded: {self.config}")
+
+        # Initialize main window first
+        self.root = MainWindow(None, None, None, self.logger)
+
+        # Disable repo dropdown initially
+        self.root.header.repo_selector.repo_dropdown.configure(state="disabled")
+
+        # Setup auth manager
+        self.auth_manager = AuthManager(self.config, self.logger)
+
+        # Setup auth GUI
+        self.auth_gui = AuthGUI(
+            self.root.root,
+            self.auth_manager,
+            self.root.status_interface
+        )
+        self.root.auth_gui = self.auth_gui
+
+    def setup_after_auth(self, access_token):
+        """Setup application after successful authentication"""
+        if self.setup_completed:
+            return
+
+        try:
+            # Setup GitHub client
+            self.github_client = GitHubClient(access_token, self.logger, self.auth_manager)
+
+            # Authenticate with the GitHub API
+            if self.github_client.authenticate():
+                self.setup_completed = True
+                self.logger.info(f"Access token retrieved: {access_token}")
+                self.logger.info(f"Github Client set: {self.github_client}")
+
+                # Setup data importer
+                self.data_importer = DataImporter(self.github_client, self.logger)
+
+                # Setup Import GUI
+                import_gui = ImportGUI(
+                    self.root.root,
+                    self.data_importer,
+                    self.github_client,
+                    self.logger,
+                    self.root.status_interface,
+                    self.root.repo_selection
+                )
+
+                self.root.github_client = self.github_client
+                self.root.import_gui = import_gui
+
+                # Enable and update repo dropdown
+                self.root.header.repo_selector.repo_dropdown.configure(state="normal")
+                self.root.update_repo_dropdown()
+
+                # Get user info
+                try:
+                    url = "https://api.github.com/user"
+                    headers = {
+                        "Authorization": f"token {access_token}",
+                        "Accept": "application/vnd.github.v3+json"
+                    }
+                    response = requests.get(url, headers=headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    self.logger.info(f"Successfully retrieved User info: {data}")
+                    self.root.status_interface.update(
+                        f"Logged in as {data['login']}",
+                        'success'
+                    )
+                except Exception as e:
+                    self.logger.error(f"An error has occurred getting user info: {e}")
+
+                return True
+            else:
+                self.logger.error("Failed to authenticate with GitHub API.")
+                self.root.status_interface.update(
+                    "Authentication failed. Please try again.",
+                    'error'
+                )
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error in setup_after_auth: {e}")
+            self.root.status_interface.update(
+                f"Setup error: {str(e)}",
+                'error'
+            )
+            return False
+
+    def run(self):
+        """Run the application"""
+        try:
+            # Check for stored token
+            self.auth_manager.load_stored_tokens()
+            old_token = self.auth_manager.access_token
+
+            if old_token:
+                self.logger.info("Found stored token, attempting to refresh")
+                if self.auth_manager.refresh_access_token():
+                    self.logger.info("Successfully refreshed token")
+                    if self.setup_after_auth(self.auth_manager.access_token):
+                        self.root.status_interface.update(
+                            "Successfully authenticated with GitHub",
+                            'success'
+                        )
+                else:
+                    self.logger.error("Token refresh failed, starting new auth flow")
+                    self.root.status_interface.update(
+                        "Token expired, please log in again",
+                        'info'
+                    )
+                    self.auth_manager.set_on_auth_success(self.setup_after_auth)
+                    self.auth_manager.start_oauth_flow()
+            else:
+                self.logger.info("No stored token found, starting auth flow")
+                self.root.status_interface.update(
+                    "Please log in to GitHub",
+                    'info'
+                )
+                self.auth_manager.set_on_auth_success(self.setup_after_auth)
+                self.auth_manager.start_oauth_flow()
+
+            # Start the main event loop
+            self.root.run()
+
+        except Exception as e:
+            self.logger.error(f"Error in run: {e}")
+            raise
+
+
 def main():
-    # --- Setup ---
-    logger = Logger("github_importer")
-    config = Config()
-    logger.info(f"Configuration loaded: {config}")
+    """Main entry point for the application"""
+    try:
+        app = Application()
+        app.run()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        raise
 
-    auth_manager = AuthManager(config, logger)
-    github_client = None
-    data_importer = None
-
-    # --- GUI Setup ---
-    root = MainWindow(None, None, None, logger)
-    auth_gui = AuthGUI(root.root, auth_manager, root.status_interface)
-    root.auth_gui = auth_gui
-
-    def setup_after_auth(access_token):
-        nonlocal github_client, data_importer, root
-
-        github_client = GitHubClient(access_token, logger, auth_manager)
-        status_code = github_client.check_access_token()
-        if 200 <= status_code <= 299:
-            logger.info(f"Access token retrieved: {access_token}")
-            logger.info(f"Github Client set: {github_client}")
-            data_importer = DataImporter(github_client, logger)
-            import_gui = ImportGUI(root.root, data_importer, github_client, logger, root.status_interface, root.repo_selection)
-            root.github_client = github_client
-            root.import_gui = import_gui
-            url = "https://api.github.com/user"
-            headers = {
-                "Authorization": f"token {access_token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            try:
-                response = requests.get(url, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-                logger.info(f"Successfully retrieved User info: {data}")
-            except Exception as e:
-                logger.error(f"An error has occurred getting user info: {e}")
-
-            root.update_repo_dropdown()
-            import_gui.import_button.pack(pady=10)
-            import_gui.export_button.pack(pady=10)
-            import_gui.clear_button.pack(pady=10)
-            root.run()  # Start the Tkinter main loop
-
-        else:
-            logger.error(f"Invalid Access Token: Status code: {status_code}")
-            messagebox.showerror("Error", "Invalid access token. Please try again.")
-
-    def set_token_and_client(access_token):
-        if not hasattr(set_token_and_client, 'called'):
-            logger.info("Setting access token")
-            set_token_and_client.called = True
-            setup_after_auth(access_token)
-
-    auth_manager.set_on_auth_success(set_token_and_client)
-
-    # Check for old token and refresh if necessary
-    auth_manager.load_stored_tokens()
-    old_token = auth_manager.access_token
-    if old_token:
-        logger.info("Found old token, attempting to refresh it.")
-        if auth_manager.refresh_access_token():
-            logger.info("Successfully refreshed token.")
-            set_token_and_client(auth_manager.access_token)
-        else:
-            logger.error("Failed to refresh token. Please login again.")
-            root.run()
-    else:
-        logger.error("No old token found. Please login.")
-        root.run()
 
 if __name__ == "__main__":
     main()

@@ -1,641 +1,403 @@
+# github_importer/gui/main_window.py
+
 import customtkinter as ctk
-from tkinter import scrolledtext, messagebox
+import tkinter as tk
+from tkinter import filedialog
+from typing import Optional, Dict, Any
+from datetime import datetime
+
 from github_importer.utils.logger import Logger
+from github_importer.import_export.data_importer import DataImporter
+from github_importer.github_api.github_client import GitHubClient
+from github_importer.utils.token_storage import TokenStorage
+from github_importer.auth.auth_manager import AuthManager
+from github_importer.config.config import Config
+
+from github_importer.gui.notification_manager import NotificationManager
+from github_importer.gui.ui_elements import UIElements
+from github_importer.gui.header_manager import HeaderManager
+from github_importer.gui.navigation_manager import NavigationManager
+from github_importer.gui.content_area_manager import ContentAreaManager
+from github_importer.gui.import_section_manager import ImportSectionManager
+from github_importer.gui.activity_log_manager import ActivityLogManager
+from github_importer.gui.textbox_logger import TextboxLogger
+from github_importer.gui.status_interface import StatusInterface
+from github_importer.gui.activity_log_model import ActivityLogModel
+from github_importer.gui.notification_model import NotificationModel
+from github_importer.gui.custom_messagebox import CustomMessageBox
 
 
 class MainWindow:
-    def __init__(self, auth_gui, github_client, import_gui, logger):
+    """
+    The main application window for the GitHub Milestones Importer.
+
+    This class sets up the main GUI using customtkinter, following GitHub's
+    design guidelines. It manages the overall structure and interactions between
+    components and handles application-level actions.
+
+    Attributes:
+        root (ctk.CTk): The main application window
+        logger (Logger): The application's logger instance
+        github_client (GitHubClient): GitHub client for API interactions
+        ui_elements (UIElements): Styling settings
+        notification_manager (NotificationManager): Handles notifications
+        status_interface (StatusInterface): Manages status updates
+    """
+
+    def __init__(self,
+                 auth_gui: Optional['AuthGUI'],
+                 github_client: Optional['GitHubClient'],
+                 import_gui: Optional['ImportGUI'],
+                 logger: Logger):
+        """
+        Initialize the main window with all necessary components.
+
+        Args:
+            auth_gui: Authentication GUI instance
+            github_client: GitHub client instance
+            import_gui: Import GUI instance
+            logger: Logger instance
+        """
+        # Initialize core components
+        self.logger = logger
         self.root = ctk.CTk()
         self.root.title("GitHub Milestones Importer")
-        self.logger = logger
-        self.github_client = github_client
-        self.auth_gui = auth_gui
-        self.import_gui = import_gui
 
-        # Add this line to create the status interface
-        self.status_interface = self._create_status_interface()
+        # Set up managers and clients
+        self.auth_manager = AuthManager(Config(), logger)
+        self.github_client = GitHubClient(
+            TokenStorage().load_tokens()[0],
+            logger,
+            self.auth_manager
+        )
 
-        # GitHub's exact color palette
-        self.colors = {
-            'background': "#0D1117",  # Main background
-            'surface': "#161B22",  # Surface/card background
-            'header': "#010409",  # Header background
-            'primary': "#2EA043",  # Primary button
-            'primary_hover': "#3FB950",  # Primary button hover
-            'secondary': "#21262D",  # Secondary button
-            'secondary_hover': "#30363D",  # Secondary button hover
-            'border': "#30363D",  # Borders
-            'text': "#C9D1D9",  # Primary text
-            'text_secondary': "#8B949E",  # Secondary text
-            'accent': "#58A6FF",  # Links and accents
-            'error': "#F85149",  # Error states
-            'success': "#2EA043",  # Success states
-            'tab_active': "#1F6FEB",  # Active tab indicator
-            'navbar': "#161B22",  # Navigation bar
-            'counter_bg': "#30363D",  # Badge/counter background
-            'dropdown_hover': "#1F6FEB"  # Dropdown hover state
-        }
+        # Initialize models
+        self.activity_log_model = ActivityLogModel()
+        self.notification_model = NotificationModel()
 
-        # Window Setup
-        self.root.configure(fg_color=self.colors['background'])
-        self.root.geometry("1200x800")  # Larger window for GitHub-like layout
+        # Initialize UI components
+        self.ui_elements = UIElements()
+        self.notification_manager = NotificationManager(self.root, self.ui_elements)
+        self.textbox_logger = TextboxLogger(self.ui_elements)
+        self.status_interface = StatusInterface(self, self.notification_manager)
 
-        # Create main layout
-        self.create_header()
-        self.create_navigation()
-        self.create_main_content()
+        # Set up activity log
+        self.activity_log = ActivityLogManager(
+            self.ui_elements,
+            self.textbox_logger,
+            self.root
+        )
 
-        # Initialize events
-        self.logger.addHandler(self.log_handler)
+        # Initialize data importer
+        self.data_importer = DataImporter(self.github_client, logger)
+        self.data_importer.status_interface = self.status_interface
+
+        # Set up import section with all callbacks
+        self.import_section = ImportSectionManager(
+            self.root,
+            self.ui_elements,
+            self.import_milestones,  # Import callback
+            self.export_milestones,  # Export callback
+            self.clear_milestones,  # Clear callback
+            self.github_client,
+            self.logger
+        )
+
+        # Set up navigation and header
+        self.navigation = NavigationManager(
+            self.root,
+            self.ui_elements,
+            self.update_repo_dropdown_command
+        )
+
+        self.header = HeaderManager(
+            self.root,
+            self.ui_elements,
+            self.update_repo_dropdown_command
+        )
+
+        # Set up content area
+        self.content_area = ContentAreaManager(
+            self.root,
+            self.ui_elements,
+            self.import_section,
+            self.activity_log
+        )
+
+        # Initialize events and state
+        self.logger.addHandler(self.textbox_logger)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.repo_selection = self.header.repo_selector.repo_selection
+
+        # Update initial state
         self.update_repo_dropdown()
+        self.import_section.disable_buttons()  # Disable all buttons initially
 
-    def _create_status_interface(self):
+    def update_repo_dropdown_command(self, selected_repo: str) -> None:
         """
-        Creates a status interface that maintains compatibility with code expecting a status label
-        while providing GitHub-style notifications
+        Handle repository selection changes.
+
+        Args:
+            selected_repo: The selected repository string
         """
-
-        class StatusInterface:
-            def __init__(self, main_window):
-                self.main_window = main_window
-
-            def configure(self, **kwargs):
-                """Handles status updates in a GitHub-style way"""
-                if 'text' in kwargs:
-                    message = kwargs['text']
-                    # Determine notification type based on message content
-                    level = 'info'
-                    if any(word in message.lower() for word in ['error', 'failed', 'invalid']):
-                        level = 'error'
-                    elif any(word in message.lower() for word in ['success', 'completed', 'retrieved']):
-                        level = 'success'
-
-                    # Log the message
-                    if level == 'error':
-                        self.main_window.logger.error(message)
-                    else:
-                        self.main_window.logger.info(message)
-
-                    # Show in the activity log
-                    self.main_window.log_handler({'level': level, 'msg': message})
-
-        return StatusInterface(self)
-
-    def create_header(self):
-        """Creates GitHub's top header with navigation and user controls"""
-        # Main header bar
-        header = ctk.CTkFrame(
-            self.root,
-            fg_color=self.colors['header'],
-            height=60,
-            corner_radius=0
-        )
-        header.pack(fill="x", pady=0)
-        header.pack_propagate(False)
-
-        # GitHub-style layout with flex-like positioning
-        # Left section - Logo and search
-        left_section = ctk.CTkFrame(header, fg_color="transparent")
-        left_section.pack(side="left", padx=16, fill="y")
-
-        # GitHub "Octocat" logo placeholder
-        logo_label = ctk.CTkLabel(
-            left_section,
-            text="󰊤",  # Octocat-like symbol
-            text_color=self.colors['text'],
-            font=("Segoe UI", 24)
-        )
-        logo_label.pack(side="left", padx=(0, 16))
-
-        # Search bar with GitHub styling
-        search_frame = ctk.CTkFrame(
-            left_section,
-            fg_color=self.colors['background'],
-            height=28,
-            corner_radius=6
-        )
-        search_frame.pack(side="left", padx=8)
-
-        search_entry = ctk.CTkEntry(
-            search_frame,
-            placeholder_text="Search or jump to...",
-            text_color=self.colors['text'],
-            fg_color="transparent",
-            border_width=0,
-            height=28,
-            width=240
-        )
-        search_entry.pack(side="left", padx=8)
-
-        # Right section - Navigation items
-        right_section = ctk.CTkFrame(header, fg_color="transparent")
-        right_section.pack(side="right", padx=16, fill="y")
-
-        # GitHub-style navigation items
-        nav_items = ["Pull requests", "Issues", "Marketplace", "Explore"]
-        for item in nav_items:
-            nav_button = ctk.CTkButton(
-                right_section,
-                text=item,
-                fg_color="transparent",
-                hover_color=self.colors['surface'],
-                text_color=self.colors['text'],
-                height=32,
-                corner_radius=4
-            )
-            nav_button.pack(side="left", padx=4)
-
-    def create_navigation(self):
-        """Creates the repository-specific navigation bar"""
-        nav_bar = ctk.CTkFrame(
-            self.root,
-            fg_color=self.colors['navbar'],
-            height=50,
-            corner_radius=0
-        )
-        nav_bar.pack(fill="x", pady=(1, 0))
-        nav_bar.pack_propagate(False)
-
-        # Repository selector with GitHub styling
-        self.repo_selection = ctk.StringVar()
-        repo_frame = ctk.CTkFrame(nav_bar, fg_color="transparent")
-        repo_frame.pack(side="left", padx=16, fill="y")
-
-        # Repository dropdown with GitHub's book icon
-        self.repo_dropdown = ctk.CTkOptionMenu(
-            repo_frame,
-            variable=self.repo_selection,
-            # fg_color="transparent",
-            button_color=self.colors['secondary'],
-            button_hover_color=self.colors['secondary_hover'],
-            text_color=self.colors['text'],
-            dropdown_fg_color=self.colors['surface'],
-            dropdown_hover_color=self.colors['dropdown_hover'],
-            dropdown_text_color=self.colors['text'],
-            width=300,
-            height=32,
-            corner_radius=6,
-            font=("Segoe UI", 12),
-            dynamic_resizing=False
-        )
-        self.repo_dropdown.pack(side="left", padx=(0, 8))
-
-        # Watch, Fork, Star buttons (GitHub-style)
-        for action in [("󰯈 Watch", "12"), ("󰘖 Fork", "5"), ("󰓎 Star", "23")]:
-            btn_frame = ctk.CTkFrame(
-                repo_frame,
-                fg_color=self.colors['secondary'],
-                corner_radius=6,
-                height=32
-            )
-            btn_frame.pack(side="left", padx=4)
-            btn_frame.pack_propagate(False)
-
-            btn = ctk.CTkButton(
-                btn_frame,
-                text=action[0],
-                fg_color="transparent",
-                hover_color=self.colors['secondary_hover'],
-                text_color=self.colors['text'],
-                height=32,
-                corner_radius=6,
-                font=("Segoe UI", 12)
-            )
-            btn.pack(side="left", padx=8)
-
-            # Counter badge
-            counter = ctk.CTkLabel(
-                btn_frame,
-                text=action[1],
-                fg_color=self.colors['counter_bg'],
-                text_color=self.colors['text'],
-                corner_radius=10,
-                font=("Segoe UI", 11),
-                width=30,
-                height=20
-            )
-            counter.pack(side="right", padx=8)
-
-    def create_main_content(self):
-        """Creates the main content area with tabs and content"""
-        # Create tab bar with GitHub styling
-        tab_frame = ctk.CTkFrame(
-            self.root,
-            fg_color=self.colors['background'],
-            height=50,
-            corner_radius=0
-        )
-        tab_frame.pack(fill="x", pady=(0, 1))
-
-        # GitHub-style tabs with icons and counters
-        tabs = [
-            ("󰈙 Code", ""),
-            ("◎ Issues", "12"),
-            ("󰓼 Pull requests", "4"),
-            ("󰟜 Actions", ""),
-            ("󰼏 Projects", "2"),
-            ("󰏗 Wiki", ""),
-            ("󰋗 Security", ""),
-            ("󰧮 Insights", ""),
-            ("⚙️ Settings", "")
-        ]
-
-        for i, (tab_text, count) in enumerate(tabs):
-            tab_button = ctk.CTkButton(
-                tab_frame,
-                text=tab_text + (f" {count}" if count else ""),
-                fg_color="transparent",
-                hover_color=self.colors['surface'],
-                text_color=self.colors['text'],
-                height=48,
-                corner_radius=0,
-                font=("Segoe UI", 12)
-            )
-            tab_button.pack(side="left", padx=8)
-
-            # Active tab indicator
-            if i == 0:  # Code tab is active
-                indicator = ctk.CTkFrame(
-                    tab_frame,
-                    fg_color=self.colors['tab_active'],
-                    height=2,
-                    corner_radius=0
-                )
-                indicator.place(relx=0.04, rely=0.96, relwidth=0.08)
-
-        # Main content area
-        content_frame = ctk.CTkFrame(
-            self.root,
-            fg_color=self.colors['background'],
-            corner_radius=0
-        )
-        content_frame.pack(fill="both", expand=True, padx=24, pady=24)
-
-        # Add import controls
-        self.create_import_section(content_frame)
-
-        # Add activity log
-        self.create_activity_log(content_frame)
-
-    def create_import_section(self, parent):
-        """Creates the import controls section with GitHub styling"""
-        import_frame = ctk.CTkFrame(
-            parent,
-            fg_color=self.colors['surface'],
-            corner_radius=6
-        )
-        import_frame.pack(fill="x", pady=(0, 16))
-
-        # Header with icon
-        header_frame = ctk.CTkFrame(
-            import_frame,
-            fg_color=self.colors['secondary'],
-            height=40,
-            corner_radius=6
-        )
-        header_frame.pack(fill="x")
-
-        header_label = ctk.CTkLabel(
-            header_frame,
-            text="󰍉 Import Milestones",
-            text_color=self.colors['text'],
-            font=("Segoe UI", 14, "bold")
-        )
-        header_label.pack(side="left", padx=16, pady=8)
-
-        # Import button
-        self.import_button = ctk.CTkButton(
-            import_frame,
-            text="Import Milestones",
-            command=self.import_milestones,
-            fg_color=self.colors['primary'],
-            hover_color=self.colors['primary_hover'],
-            text_color="#FFFFFF",
-            font=("Segoe UI", 12),
-            height=32,
-            corner_radius=6
-        )
-        self.import_button.pack(side="left", padx=16, pady=16)
-
-    def create_activity_log(self, parent):
-        """Creates GitHub-style activity log section"""
-        log_frame = ctk.CTkFrame(
-            parent,
-            fg_color=self.colors['surface'],
-            corner_radius=6
-        )
-        log_frame.pack(fill="both", expand=True)
-
-        # Header with icon
-        header_frame = ctk.CTkFrame(
-            log_frame,
-            fg_color=self.colors['secondary'],
-            height=40,
-            corner_radius=6
-        )
-        header_frame.pack(fill="x")
-
-        header_label = ctk.CTkLabel(
-            header_frame,
-            text="󰑍 Activity",
-            text_color=self.colors['text'],
-            font=("Segoe UI", 14, "bold")
-        )
-        header_label.pack(side="left", padx=16, pady=8)
-
-        # Activity log text area
-        self.log_text = scrolledtext.ScrolledText(
-            log_frame,
-            wrap="word",
-            bg=self.colors['background'],
-            fg=self.colors['text'],
-            insertbackground=self.colors['text'],
-            font=("Segoe UI", 11),
-            borderwidth=1,
-            highlightthickness=1,
-            highlightcolor=self.colors['border'],
-            relief="flat"
-        )
-        self.log_text.pack(fill="both", expand=True, padx=16, pady=16)
-
-    def log_handler(self, record):
-        """Handles log messages with GitHub-style formatting"""
-        self.log_text.configure(state='normal')
-
-        timestamp = record.created.strftime("%H:%M:%S")
-
-        # GitHub-style status icons
-        level_icons = {
-            'INFO': '󰆼',  # Check circle
-            'ERROR': '󰅚',  # X circle
-            'WARNING': '󰀦'  # Warning triangle
-        }
-
-        level_colors = {
-            'INFO': self.colors['success'],
-            'ERROR': self.colors['error'],
-            'WARNING': '#D29922'  # GitHub warning color
-        }
-
-        icon = level_icons.get(record.levelname, '')
-        color = level_colors.get(record.levelname, self.colors['text'])
-
-        # Insert GitHub-style log entry
-        self.log_text.insert('end', f"{timestamp} ", ('timestamp',))
-        self.log_text.insert('end', f"{icon} ", ('icon',))
-        self.log_text.insert('end', f"{record.msg}\n", ('message',))
-
-        # Apply GitHub-style formatting
-        self.log_text.tag_config('timestamp', foreground=self.colors['text_secondary'])
-        self.log_text.tag_config('icon', foreground=color)
-        self.log_text.tag_config('message', foreground=self.colors['text'])
-
-        self.log_text.see('end')
-        self.log_text.configure(state='disabled')
-
-    def update_repo_dropdown(self):
-        """
-        Updates the repository selector with available GitHub repositories.
-        This method mirrors GitHub's repository navigation behavior, including
-        loading states and error handling patterns.
-        """
-        if self.github_client:
-            try:
-                # Show GitHub-style loading state
-                self.repo_dropdown.configure(
-                    state="disabled",
-                    text="Loading repositories..."
-                )
-
-                # Fetch repositories through GitHub API
-                repos = self.github_client.get_user_repos()
-
-                # Format repositories in GitHub's owner/repo style with organization icons
-                repo_list = []
-                for repo in repos:
-                    owner = repo['owner']['login']
-                    name = repo['name']
-                    # Add organization/user icon based on repo type
-                    icon = '󰒋' if repo['owner']['type'] == 'Organization' else '󰀄'
-                    repo_list.append(f"{icon} {owner}/{name}")
-
-                # Update dropdown with GitHub styling
-                self.repo_dropdown.configure(
-                    values=repo_list,
-                    state="normal",
-                    dropdown_fg_color=self.colors['surface'],
-                    dropdown_text_color=self.colors['text'],
-                    text_color=self.colors['text']
-                )
-
-                # Select first repository by default (GitHub behavior)
-                if repo_list:
-                    self.repo_selection.set(repo_list[0])
-                    self._enable_import_button()
-
-                    # Log success with GitHub-style success icon
-                    self.logger.info(f"Found {len(repo_list)} repositories")
-
-            except Exception as e:
-                # Show GitHub-style error state
-                error_message = f"Could not load repositories: {str(e)}"
-                self.repo_dropdown.configure(
-                    state="normal",
-                    text="Error loading repositories"
-                )
-                self.logger.error(error_message)
-
-                # Show GitHub-style error notification
-                self._show_notification(
-                    "Error",
-                    error_message,
-                    level="error"
-                )
-
-    def _enable_import_button(self, *args):
-        """
-        Manages the import button state following GitHub's button behavior patterns.
-        Includes proper visual feedback and state management.
-        """
-        if self.repo_selection.get():
-            # Enable with GitHub's primary button styling
-            self.import_button.configure(
-                state="normal",
-                fg_color=self.colors['primary'],
-                hover_color=self.colors['primary_hover'],
-                text="Import Milestones"
+        if selected_repo and self.validate_repository(selected_repo):
+            self._enable_import_button()
+            self.status_interface.update(
+                f"Selected repository: {selected_repo}",
+                'info'
             )
         else:
-            # Disable with GitHub's disabled button styling
-            self.import_button.configure(
-                state="disabled",
-                fg_color=self.colors['secondary'],
-                hover_color=self.colors['secondary'],
-                text="Select a repository"
+            self.status_interface.update(
+                "Invalid repository selection",
+                'error'
             )
 
-    def import_milestones(self):
+    def validate_repository(self, repo_string: str) -> bool:
         """
-        Handles the milestone import process with GitHub's progress indicators
-        and notification patterns. Provides clear visual feedback throughout
-        the import operation.
+        Validate repository string format.
+
+        Args:
+            repo_string: Repository string to validate
+
+        Returns:
+            bool: True if valid, False otherwise
         """
-        selected_repo = self.repo_selection.get()
-        if not selected_repo:
-            self._show_notification(
-                "Error",
-                "Please select a repository first",
-                level="error"
-            )
-            return
+        if not repo_string:
+            return False
+        parts = repo_string.split('/')
+        if len(parts) != 2:
+            return False
+        return all(part.strip() for part in parts)
 
-        # Extract actual repo name from formatted string
-        repo_name = selected_repo.split(" ", 1)[1]  # Remove icon prefix
-
+    def update_repo_dropdown(self) -> None:
+        """Update repository dropdown with available GitHub repositories."""
         try:
-            # Show GitHub-style loading state
-            self.import_button.configure(
-                state="disabled",
-                text="Importing...",
-                fg_color=self.colors['secondary']
+            repos = self.github_client.get_user_repos()
+            repo_list = []
+
+            for repo in repos:
+                owner = repo['owner']['login']
+                name = repo['name']
+                icon = '󰒋' if repo['owner']['type'] == 'Organization' else '󰀄'
+                repo_list.append(f"{icon} {owner}/{name}")
+
+            self.header.repo_selector.repo_dropdown.configure(
+                values=repo_list,
+                state="normal",
+                dropdown_fg_color=self.ui_elements.surface_color,
+                dropdown_text_color=self.ui_elements.text_color,
+                text_color=self.ui_elements.text_color
             )
 
-            # Add loading indicator to log
-            self.logger.info(f"Starting import for {repo_name}")
-
-            # Perform the import
-            self.import_gui.run(repo_name)
-
-            # Show success notification
-            self._show_notification(
-                "Success",
-                f"Successfully imported milestones for {repo_name}",
-                level="success"
+            self.status_interface.update(
+                f"Found {len(repo_list)} repositories",
+                'info'
             )
+        except Exception as e:
+            self.status_interface.update(f"Failed to update repositories: {e}", 'error')
 
-            self.logger.info(f"Successfully imported milestones for {repo_name}")
+    def _enable_import_button(self) -> None:
+        """Enable all buttons when repo is selected."""
+        if self.repo_selection.get():
+            self.import_section.enable_buttons()
+        else:
+            self.import_section.disable_buttons()
+
+    def import_milestones(self) -> None:
+        """Handle milestone import process."""
+        try:
+            selected_repo = self.repo_selection.get().split("/")
+            if len(selected_repo) != 2:
+                raise ValueError("Invalid repository format")
+
+            user_name = selected_repo[0][2:].strip()  # Remove icon
+            repo_name = selected_repo[1].strip()
+
+            file_path = self.open_file_dialog()
+            if file_path:
+                self.status_interface.update(
+                    f"Starting import from {file_path}",
+                    'info'
+                )
+                self.data_importer.import_data(file_path, user_name, repo_name)
+                self.status_interface.update(
+                    "Import completed successfully",
+                    'success'
+                )
+            else:
+                self.status_interface.update(
+                    "Import cancelled - no file selected",
+                    'info'
+                )
 
         except Exception as e:
-            # Show error notification
-            error_message = f"Failed to import milestones: {str(e)}"
-            self._show_notification(
-                "Error",
-                error_message,
-                level="error"
-            )
-            self.logger.error(error_message)
+            self.status_interface.update(f"Import failed: {e}", 'error')
 
+    def export_milestones(self) -> None:
+        """Handle milestone export process."""
+        try:
+            selected_repo = self.repo_selection.get().split("/")
+            if len(selected_repo) != 2:
+                raise ValueError("Invalid repository format")
+
+            user_name = selected_repo[0][2:].strip()  # Remove icon
+            repo_name = selected_repo[1].strip()
+
+            # Get save location
+            file_path = self.save_file_dialog(f"{user_name}_{repo_name}_milestones")
+            if file_path:
+                self.status_interface.update(
+                    f"Starting export to {file_path}",
+                    'info'
+                )
+                self.data_importer.export_milestones(user_name, repo_name, file_path)
+            else:
+                self.status_interface.update(
+                    "Export cancelled - no file selected",
+                    'info'
+                )
+
+        except Exception as e:
+            self.status_interface.update(f"Export failed: {e}", 'error')
+
+    from github_importer.gui.custom_messagebox import CustomMessageBox
+
+    def clear_milestones(self) -> None:
+        """Handle clearing all issues and milestones."""
+        try:
+            selected_repo = self.repo_selection.get().split("/")
+            if len(selected_repo) != 2:
+                raise ValueError("Invalid repository format")
+
+            user_name = selected_repo[0][2:].strip()  # Remove icon
+            repo_name = selected_repo[1].strip()
+
+            # Show confirmation dialog
+            msg = CustomMessageBox(
+                master=self.root,
+                title="Confirm Clear",
+                message=f"Are you sure you want to clear ALL issues and milestones from {user_name}/{repo_name}?\n\nThis action cannot be undone!",
+                option_1="Cancel",
+                option_2="Clear All",
+                button_color=self.ui_elements.error_color,
+                button_hover_color="#FF6B6B",
+                cancel_button_color=self.ui_elements.secondary_color
+            )
+
+            if msg.get() == "OK":  # "OK" is returned when "Clear All" is clicked
+                self.status_interface.update(
+                    f"Starting to clear all issues and milestones from {user_name}/{repo_name}...",
+                    'info'
+                )
+
+                # Perform the clear operation
+                self.data_importer.clear_all_milestones_and_issues(user_name, repo_name)
+
+                self.status_interface.update(
+                    "Successfully cleared all issues and milestones",
+                    'success'
+                )
+            else:
+                self.status_interface.update(
+                    "Clear operation cancelled",
+                    'info'
+                )
+
+        except Exception as e:
+            self.status_interface.update(f"Failed to clear issues and milestones: {e}", 'error')
+
+    def open_file_dialog(self) -> Optional[str]:
+        """
+        Open file dialog for selecting import file.
+
+        Returns:
+            Optional[str]: Selected file path or None if cancelled
+        """
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            return filedialog.askopenfilename(
+                filetypes=[("JSON files", "*.json")],
+                title="Select a JSON file to import",
+                initialdir="/"  # Start from root directory
+            )
         finally:
-            # Reset button state
-            self.import_button.configure(
-                state="normal",
-                text="Import Milestones",
-                fg_color=self.colors['primary']
+            root.destroy()
+
+    def save_file_dialog(self, default_name: str) -> Optional[str]:
+        """
+        Open file dialog for saving export file.
+
+        Args:
+            default_name: Default filename
+
+        Returns:
+            Optional[str]: Selected file path or None if cancelled
+        """
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"{default_name}_{timestamp}.json"
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")],
+                title="Save Export As",
+                initialfile=default_filename,
+                initialdir="/"  # Start from root directory
             )
+            return file_path if file_path else None
+        finally:
+            root.destroy()
 
-    def _show_notification(self, title, message, level="info"):
-        """
-        Displays GitHub-style notifications for user feedback.
-        Creates a temporary overlay notification that matches GitHub's design.
-        """
-        # Create notification window with GitHub styling
-        notification = ctk.CTkToplevel(self.root)
-        notification.title("")
-        notification.geometry("300x100")
-        notification.resizable(False, False)
+    def cleanup(self) -> None:
+        """Clean up resources before closing."""
+        self.logger.removeHandler(self.textbox_logger)
+        # Clean up other resources as needed
 
-        # Remove window decorations for clean look
-        notification.overrideredirect(True)
-
-        # Position in top-right corner (GitHub style)
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        notification.geometry(f"+{screen_width - 320}+{screen_height - 120}")
-
-        # Notification styling based on level
-        bg_color = {
-            "success": self.colors['success'],
-            "error": self.colors['error'],
-            "info": self.colors['secondary']
-        }.get(level, self.colors['secondary'])
-
-        # Create notification content
-        frame = ctk.CTkFrame(
-            notification,
-            fg_color=self.colors['surface'],
-            corner_radius=6,
-            border_width=1,
-            border_color=self.colors['border']
+    def on_close(self) -> None:
+        """Handle application closure."""
+        msg = CustomMessageBox(
+            master=self.root,
+            title="Close GitHub Milestones Importer",
+            message="Are you sure you want to close the importer?",
+            option_1="Cancel",
+            option_2="Close",
+            button_color=self.ui_elements.primary_color,
+            cancel_button_color=self.ui_elements.secondary_color
         )
-        frame.pack(fill="both", expand=True, padx=2, pady=2)
 
-        # Add icon based on notification type
-        icon = {
-            "success": "󰄬",  # Checkmark
-            "error": "󰅚",  # X mark
-            "info": "󰋼"  # Info icon
-        }.get(level, "󰋼")
-
-        icon_label = ctk.CTkLabel(
-            frame,
-            text=icon,
-            text_color=bg_color,
-            font=("Segoe UI", 16)
-        )
-        icon_label.pack(side="left", padx=(12, 8), pady=12)
-
-        # Add title and message
-        text_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        text_frame.pack(fill="both", expand=True, padx=(0, 12), pady=12)
-
-        title_label = ctk.CTkLabel(
-            text_frame,
-            text=title,
-            text_color=self.colors['text'],
-            font=("Segoe UI", 12, "bold")
-        )
-        title_label.pack(anchor="w")
-
-        message_label = ctk.CTkLabel(
-            text_frame,
-            text=message,
-            text_color=self.colors['text_secondary'],
-            font=("Segoe UI", 11)
-        )
-        message_label.pack(anchor="w")
-
-        # Auto-close notification after 3 seconds
-        notification.after(3000, notification.destroy)
-
-    def on_close(self):
-        """
-        Handles application closure with GitHub-style confirmation.
-        """
-        if messagebox.askokcancel(
-                "Close GitHub Milestones Importer",
-                "Are you sure you want to close the importer?",
-                icon='warning'
-        ):
+        if msg.get() == "OK":  # "OK" is returned when "Close" is clicked
             self.logger.info("Closing GitHub Milestones Importer")
+            self.cleanup()
             self.root.destroy()
 
-    def run(self):
+    def get_state(self) -> Dict[str, Any]:
         """
-        Initializes and runs the main application window.
-        Sets up the window with proper positioning and scaling.
+        Get current application state for testing.
+
+        Returns:
+            dict: Current state information
         """
+        return {
+            'selected_repo': self.repo_selection.get(),
+            'import_button_enabled': self.import_section.import_button.button.cget('state') == 'normal',
+            'export_button_enabled': self.import_section.export_button.button.cget('state') == 'normal',
+            'clear_button_enabled': self.import_section.clear_button.button.cget('state') == 'normal',
+            'notification_count': len(self.notification_manager.items)
+        }
+
+    def run(self) -> None:
+        """Initialize and run the main application window."""
         # Center window on screen
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
 
-        # Use GitHub-like default window size
-        window_width = 1200
-        window_height = 800
+        window_width = 800
+        window_height = 600
 
         x = (screen_width - window_width) // 2
         y = (screen_height - window_height) // 2
 
-        # Position window and start application
         self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
         self.root.mainloop()

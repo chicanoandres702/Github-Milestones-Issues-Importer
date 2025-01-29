@@ -4,7 +4,7 @@ class Logger:
     def __init__(self, name):
       self.logger = logging.getLogger(name)
       self.logger.setLevel(logging.INFO)
-
+      self.handler = None
       formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
       ch = logging.StreamHandler()
@@ -13,6 +13,10 @@ class Logger:
 
     def set_handler(self, handler):
         self.handler = handler
+
+    def removeHandler(self, handler):
+        self.logger.removeHandler(self.handler)
+        self.handler = None
 
     def addHandler(self, handler):
         self.set_handler(handler)
