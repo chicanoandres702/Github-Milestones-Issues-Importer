@@ -260,8 +260,6 @@ class MainWindow:
         except Exception as e:
             self.status_interface.update(f"Export failed: {e}", 'error')
 
-    # github_importer/gui/main_window.py
-
     from github_importer.gui.custom_messagebox import CustomMessageBox
 
     def clear_milestones(self) -> None:

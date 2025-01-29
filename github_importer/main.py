@@ -53,10 +53,10 @@ def main():
             except Exception as e:
                 logger.error(f"An error has occurred getting user info: {e}")
 
-            root.update_repo_dropdown()
-            import_gui.import_button.pack(pady=10)
-            import_gui.export_button.pack(pady=10)
-            import_gui.clear_button.pack(pady=10)
+            # root.update_repo_dropdown()
+            # import_gui.import_button.pack(pady=10)
+            # import_gui.export_button.pack(pady=10)
+            # import_gui.clear_button.pack(pady=10)
             root.run()  # Start the Tkinter main loop
 
         else:

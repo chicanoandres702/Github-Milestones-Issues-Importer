@@ -5,8 +5,8 @@ class AuthGUI:
         self.root = root
         self.auth_manager = auth_manager
         self.status_label = status_label
-        self.auth_button = ttk.Button(self.root, text="Authorize with GitHub", command=self.start_auth)
-        self.auth_button.pack(pady=10)
+        # self.auth_button = ttk.Button(self.root, text="Authorize with GitHub", command=self.start_auth)
+        # self.auth_button.pack(pady=10)
 
     def start_auth(self):
         # self.update_status("Authorizing...")

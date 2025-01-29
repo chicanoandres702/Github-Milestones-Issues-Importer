@@ -14,14 +14,14 @@ class ImportGUI:
         self.import_file_path = None
 
         # UI elements
-        self.import_button = ttk.Button(self.root, text="Import Milestones", command=self.open_file_dialog)
-        self.import_button.pack(pady=10)
-
-        self.export_button = ttk.Button(self.root, text="Export Milestones", command=self.export_milestones)
-        self.export_button.pack(pady=10)
-
-        self.clear_button = ttk.Button(self.root, text="Clear Issues/Milestones", command=self.clear_milestones_and_issues)
-        self.clear_button.pack(pady=10)
+        # self.import_button = ttk.Button(self.root, text="Import Milestones", command=self.open_file_dialog)
+        # self.import_button.pack(pady=10)
+        #
+        # self.export_button = ttk.Button(self.root, text="Export Milestones", command=self.export_milestones)
+        # self.export_button.pack(pady=10)
+        #
+        # self.clear_button = ttk.Button(self.root, text="Clear Issues/Milestones", command=self.clear_milestones_and_issues)
+        # self.clear_button.pack(pady=10)
 
     def clear_milestones_and_issues(self):
       repo_string = self.repo_dropdown.get()
