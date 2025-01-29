@@ -1,9 +1,9 @@
-# github_importer/github_api/github_client.py
-
 import requests
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import time
 import logging
+import threading
+from queue import Queue
 
 
 class GitHubClient:
@@ -34,6 +34,9 @@ class GitHubClient:
         self.headers = self._get_headers()
         self.rate_limit_remaining = None
         self.rate_limit_reset = None
+
+    def _sleep(self):
+        time.sleep(2)
 
     def _get_headers(self) -> Dict[str, str]:
         """
@@ -74,26 +77,82 @@ class GitHubClient:
             self.logger.warning(f"Rate limit low. Waiting {wait_time} seconds.")
             time.sleep(wait_time)
 
-    def _make_request(self, method: str, url: str, **kwargs) -> requests.Response:
+    def _log_request(self, method, url, headers, data=None):
+        self.logger.info(f"Request: {method} {url} Headers: {headers} Data: {data}")
+
+    def _make_request(self, method: str, url: str, params: Dict = None, json: Dict = None,
+                      **kwargs) -> requests.Response:
         """
         Make a generic API request with error handling.
 
         Args:
             method: HTTP method
             url: Request URL
+            params: Query parameters for the request
+            json: JSON body for the request
             **kwargs: Additional request parameters
 
         Returns:
             API response
         """
         try:
-            response = requests.request(method, url, headers=self.headers, **kwargs)
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=self.headers,
+                params=params,
+                json=json,
+                **kwargs
+            )
             self._handle_rate_limit(response)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
             self.logger.error(f"API Request Error: {e}")
             raise
+
+    def delete_milestone(self, repo_owner, repo_name, milestone_number):
+        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones/{milestone_number}"
+        self._log_request("DELETE", url, self.headers)
+        response = self._make_request("DELETE", url, self.headers)
+        if response:
+            self.logger.info(f"Successfully deleted milestone: {milestone_number}")
+            return response.status_code
+        else:
+            return None
+
+    def create_issue(self, repo_owner, repo_name, issue_data):
+        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/issues"
+        self._log_request("POST", url, self.headers, issue_data)
+        response = self._make_request("POST", url, self.headers, issue_data)
+        if response:
+            if response.status_code == 201:
+                self.logger.info(f"Successfully created issue: {issue_data['title']}")
+                return response.json()
+            else:
+                self.logger.error(f"Failed to create issue: {response.status_code} - {response.text}")
+                return None
+        else:
+            self.logger.error("No response received from the GitHub API.")
+            return None
+
+
+
+    def create_milestone(self, repo_owner, repo_name, milestone_data):
+        url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/milestones"
+        self._log_request("POST", url, self.headers, milestone_data)
+        response = self._make_request("POST", url, self.headers, milestone_data)
+        if response:
+            if response.status_code == 201:
+                self.logger.info(f"Successfully created milestone: {milestone_data['title']}")
+                return response.json()
+            else:
+                self.logger.error(f"Failed to create milestone: {response.status_code} - {response.text}")
+                return None
+        else:
+            self.logger.error("No response received from the GitHub API.")
+            return None
+
 
     def get_user_repos(self) -> List[Dict[str, Any]]:
         """
@@ -142,8 +201,6 @@ class GitHubClient:
             # For each milestone, fetch its issues
             for milestone in milestones:
                 milestone_number = milestone['number']
-
-                # Prepare issues URL and parameters
                 issues_url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/issues"
                 issues_params = {
                     "milestone": milestone_number,
@@ -154,14 +211,11 @@ class GitHubClient:
                 milestone_issues = []
                 current_issues_url = issues_url
 
-                # Fetch issues for this milestone with pagination
                 while current_issues_url:
                     issues_response = self._make_request('GET', current_issues_url, params=issues_params)
                     issues_data = issues_response.json()
 
-                    # Process each issue
                     for issue in issues_data:
-                        # Prepare issue details
                         formatted_issue = {
                             "title": issue['title'],
                             "number": issue['number'],
@@ -173,7 +227,6 @@ class GitHubClient:
                             "comments_count": issue['comments']
                         }
 
-                        # Fetch comments if they exist
                         if issue['comments'] > 0:
                             comments_url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/issues/{issue['number']}/comments"
                             comments_response = self._make_request('GET', comments_url)
@@ -188,14 +241,12 @@ class GitHubClient:
 
                         milestone_issues.append(formatted_issue)
 
-                    # Check for pagination of issues
                     if 'next' in issues_response.links:
                         current_issues_url = issues_response.links['next']['url']
-                        issues_params = {}  # Clear params for subsequent pages
+                        issues_params = {}
                     else:
                         current_issues_url = None
 
-                # Add issues to the milestone
                 milestone['issues'] = milestone_issues
 
             self.logger.info(f"Retrieved {len(milestones)} milestones with their issues")
@@ -206,288 +257,131 @@ class GitHubClient:
             self.logger.error(error_msg)
             raise Exception(error_msg)
 
-
-    def create_milestone(self, repo_owner: str, repo_name: str, milestone_data: Dict[str, Any]) -> Dict[str, Any]:
+    def delete_all_issues(self, repo_owner: str, repo_name: str, status_callback: Optional[Callable] = None) -> threading.Thread:
         """
-        Create a new milestone in a repository.
+        Delete all issues in a repository using GraphQL on a separate thread.
 
         Args:
             repo_owner: Repository owner
             repo_name: Repository name
-            milestone_data: Milestone details
+            status_callback: Callback function to update UI status
 
         Returns:
-            Created milestone data
+            Thread object handling the deletion process
         """
-        url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/milestones"
-        response = self._make_request('POST', url, json=milestone_data)
-        return response.json()
-
-    def delete_milestone(self, repo_owner: str, repo_name: str, milestone_number: int) -> None:
-        """
-        Delete a milestone from a repository.
-
-        Args:
-            repo_owner: Repository owner
-            repo_name: Repository name
-            milestone_number: Milestone number to delete
-        """
-        url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/milestones/{milestone_number}"
-        self._make_request('DELETE', url)
-
-    def create_issue(self, repo_owner: str, repo_name: str, issue_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Create a new issue in a repository.
-
-        Args:
-            repo_owner: Repository owner
-            repo_name: Repository name
-            issue_data: Issue details
-
-        Returns:
-            Created issue data
-        """
-        url = f"{self.base_url}/repos/{repo_owner}/{repo_name}/issues"
-        response = self._make_request('POST', url, json=issue_data)
-        return response.json()
-
-    def delete_all_issues(self, repo_owner: str, repo_name: str) -> None:
-        """
-        Delete all issues in a repository using GraphQL.
-
-        Args:
-            repo_owner: Repository owner
-            repo_name: Repository name
-        """
-        try:
-            # First, get all issue node IDs
-            query = """
-            query GetRepositoryIssues($owner: String!, $repo: String!) {
-                repository(owner: $owner, name: $repo) {
-                    issues(first: 100, states: [OPEN, CLOSED]) {
-                        nodes {
-                            id
-                            number
-                        }
-                        pageInfo {
-                            hasNextPage
-                            endCursor
-                        }
-                    }
-                }
-            }
-            """
-
-            variables = {
-                "owner": repo_owner,
-                "repo": repo_name
-            }
-
-            # Collect all issue node IDs
-            all_issue_node_ids = []
-            has_next_page = True
-            cursor = None
-
-            while has_next_page:
-                # Update variables with cursor for pagination
-                if cursor:
-                    query = """
-                    query GetRepositoryIssues($owner: String!, $repo: String!, $cursor: String!) {
-                        repository(owner: $owner, name: $repo) {
-                            issues(first: 100, states: [OPEN, CLOSED], after: $cursor) {
-                                nodes {
-                                    id
-                                    number
-                                }
-                                pageInfo {
-                                    hasNextPage
-                                    endCursor
-                                }
+        def deletion_worker():
+            try:
+                # First, get all issue node IDs
+                query = """
+                query GetRepositoryIssues($owner: String!, $repo: String!) {
+                    repository(owner: $owner, name: $repo) {
+                        issues(first: 100, states: [OPEN, CLOSED]) {
+                            nodes {
+                                id
+                                number
+                                title
+                            }
+                            pageInfo {
+                                hasNextPage
+                                endCursor
                             }
                         }
                     }
-                    """
-                    variables["cursor"] = cursor
+                }
+                """
 
-                # Make GraphQL request
-                payload = {
-                    "query": query,
-                    "variables": variables
+                variables = {
+                    "owner": repo_owner,
+                    "repo": repo_name
                 }
 
-                response = requests.post(
-                    self.graphql_url,
-                    headers=self._graphql_headers(),
-                    json=payload
-                )
-                response.raise_for_status()
-                result = response.json()
+                # Collect all issue node IDs
+                all_issues = []
+                has_next_page = True
+                cursor = None
 
-                # Check for GraphQL errors
-                if 'errors' in result:
-                    raise Exception(f"GraphQL Error: {result['errors']}")
+                if status_callback:
+                    status_callback("Fetching issues...")
 
-                # Extract issue node IDs
-                issues = result['data']['repository']['issues']
-                all_issue_node_ids.extend([issue['id'] for issue in issues['nodes']])
-
-                # Update pagination info
-                has_next_page = issues['pageInfo']['hasNextPage']
-                cursor = issues['pageInfo']['endCursor']
-
-            # Delete issues individually
-            self.delete_issues_individually(all_issue_node_ids)
-
-            self.logger.info(f"Deleted {len(all_issue_node_ids)} issues in {repo_owner}/{repo_name}")
-
-        except Exception as e:
-            error_msg = f"Failed to delete issues: {str(e)}"
-            self.logger.error(error_msg)
-            raise Exception(error_msg)
-
-    def delete_issues_individually(self, issue_node_ids: List[str]) -> None:
-        """
-        Delete issues one by one using GraphQL mutations.
-
-        Args:
-            issue_node_ids: List of issue node IDs to delete
-        """
-        # GraphQL mutation for deleting a single issue
-        mutation = """
-        mutation DeleteIssue($input: DeleteIssueInput!) {
-            deleteIssue(input: $input) {
-                clientMutationId
-            }
-        }
-        """
-
-        # Delete issues one by one
-        for node_id in issue_node_ids:
-            try:
-                payload = {
-                    "query": mutation,
-                    "variables": {
-                        "input": {
-                            "issueId": node_id
+                while has_next_page:
+                    if cursor:
+                        query = """
+                        query GetRepositoryIssues($owner: String!, $repo: String!, $cursor: String!) {
+                            repository(owner: $owner, name: $repo) {
+                                issues(first: 100, states: [OPEN, CLOSED], after: $cursor) {
+                                    nodes {
+                                        id
+                                        number
+                                        title
+                                    }
+                                    pageInfo {
+                                        hasNextPage
+                                        endCursor
+                                    }
+                                }
+                            }
                         }
+                        """
+                        variables["cursor"] = cursor
+
+                    payload = {
+                        "query": query,
+                        "variables": variables
                     }
-                }
 
-                response = requests.post(
-                    self.graphql_url,
-                    headers=self._graphql_headers(),
-                    json=payload
-                )
-                response.raise_for_status()
-                result = response.json()
+                    response = requests.post(
+                        self.graphql_url,
+                        headers=self._graphql_headers(),
+                        json=payload
+                    )
+                    response.raise_for_status()
+                    result = response.json()
 
-                # Check for GraphQL errors
-                if 'errors' in result:
-                    self.logger.warning(f"Error deleting issue {node_id}: {result['errors']}")
+                    if 'errors' in result:
+                        raise Exception(f"GraphQL Error: {result['errors']}")
 
-                # Add a small delay to respect rate limits
-                time.sleep(0.5)
+                    issues = result['data']['repository']['issues']
+                    all_issues.extend(issues['nodes'])
 
-            except requests.exceptions.RequestException as e:
-                self.logger.error(f"Error deleting issue {node_id}: {e}")
+                    has_next_page = issues['pageInfo']['hasNextPage']
+                    cursor = issues['pageInfo']['endCursor']
 
-    def batch_delete_issues(self, issue_node_ids: List[str]) -> None:
-        """
-        Batch delete issues using GraphQL mutations.
+                total_issues = len(all_issues)
+                if status_callback:
+                    status_callback(f"Found {total_issues} issues to delete")
 
-        Args:
-            issue_node_ids: List of issue node IDs to delete
-        """
-        # GraphQL mutation for deleting multiple issues
-        mutation = """
-        mutation DeleteIssues($input: [DeleteIssueInput!]!) {
-            deleteIssues(input: $input) {
-                clientMutationId
-            }
-        }
-        """
+                for index, issue in enumerate(all_issues, 1):
+                    try:
+                        if status_callback:
+                            status_message = (
+                                f"Deleting issue {index}/{total_issues}: "
+                                f"#{issue['number']} - {issue['title']}"
+                            )
+                            status_callback(status_message)
 
-        # Break issues into batches of 10 to avoid overwhelming the API
-        batch_size = 10
-        for i in range(0, len(issue_node_ids), batch_size):
-            batch = issue_node_ids[i:i + batch_size]
+                        self.delete_issue_graphql(issue['id'])
+                        time.sleep(0.5)  # Rate limiting delay
 
-            # Prepare input for mutation
-            inputs = [{"issueId": node_id} for node_id in batch]
+                    except Exception as e:
+                        error_msg = f"Error deleting issue #{issue['number']}: {str(e)}"
+                        self.logger.error(error_msg)
+                        if status_callback:
+                            status_callback(error_msg)
 
-            payload = {
-                "query": mutation,
-                "variables": {"input": inputs}
-            }
+                if status_callback:
+                    status_callback(f"Successfully deleted {total_issues} issues")
 
-            try:
-                response = requests.post(
-                    self.graphql_url,
-                    headers=self._graphql_headers(),
-                    json=payload
-                )
-                response.raise_for_status()
-                result = response.json()
+            except Exception as e:
+                error_msg = f"Failed to delete issues: {str(e)}"
+                self.logger.error(error_msg)
+                if status_callback:
+                    status_callback(error_msg)
+                raise Exception(error_msg)
 
-                # Check for GraphQL errors
-                if 'errors' in result:
-                    raise Exception(f"GraphQL Error in batch delete: {result['errors']}")
-
-            except requests.exceptions.RequestException as e:
-                self.logger.error(f"Error in batch delete: {e}")
-                raise
-
-
-    def get_issue_node_id(self, repo_owner: str, repo_name: str, issue_number: int) -> str:
-        """
-        Retrieve the node ID for a specific issue using GraphQL.
-
-        Args:
-            repo_owner: Repository owner
-            repo_name: Repository name
-            issue_number: Issue number
-
-        Returns:
-            Node ID of the issue
-        """
-        query = """
-        query GetIssueNodeId($owner: String!, $repo: String!, $number: Int!) {
-            repository(owner: $owner, name: $repo) {
-                issue(number: $number) {
-                    id
-                }
-            }
-        }
-        """
-
-        variables = {
-            "owner": repo_owner,
-            "repo": repo_name,
-            "number": issue_number
-        }
-
-        payload = {
-            "query": query,
-            "variables": variables
-        }
-
-        try:
-            response = requests.post(
-                self.graphql_url,
-                headers=self._graphql_headers(),
-                json=payload
-            )
-            response.raise_for_status()
-            result = response.json()
-
-            if 'errors' in result:
-                raise Exception(f"GraphQL Error: {result['errors']}")
-
-            return result['data']['repository']['issue']['id']
-
-        except requests.exceptions.RequestException as e:
-            self.logger.error(f"GraphQL Request Error: {e}")
-            raise
+        deletion_thread = threading.Thread(target=deletion_worker)
+        deletion_thread.daemon = True
+        deletion_thread.start()
+        return deletion_thread
 
     def delete_issue_graphql(self, issue_node_id: str) -> Dict[str, Any]:
         """
@@ -552,3 +446,65 @@ class GitHubClient:
         except Exception as e:
             self.logger.error(f"Authentication failed: {e}")
             return False
+
+
+# Example usage with status window
+if __name__ == "__main__":
+    import tkinter as tk
+    from tkinter import ttk
+
+    class StatusWindow:
+        def __init__(self):
+            self.root = tk.Tk()
+            self.root.title("Issue Deletion Status")
+            self.root.geometry("400x150")
+
+            self.status_label = ttk.Label(self.root, text="", wraplength=380)
+            self.status_label.pack(pady=20)
+
+            self.progress = ttk.Progressbar(self.root, mode='indeterminate')
+            self.progress.pack(fill=tk.X, padx=20)
+
+        def update_status(self, message: str):
+            self.status_label.config(text=message)
+            self.root.update()
+
+        def start_deletion(self, github_client, repo_owner: str, repo_name: str):
+            self.progress.start()
+            deletion_thread = github_client.delete_all_issues(
+                repo_owner,
+                repo_name,
+                status_callback=self.update_status
+            )
+
+            def check_thread():
+                if deletion_thread.is_alive():
+                    self.root.after(100, check_thread)
+                else:
+                    self.progress.stop()
+                    self.update_status("Deletion completed!")
+
+            check_thread()
+
+        def run(self):
+            self.root.mainloop()
+
+    # Setup logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Initialize GitHub client
+    github_client = GitHubClient(
+        token="your_github_token",
+        logger=logger,
+        auth_manager=None
+    )
+
+    # Create and run status window
+    status_window = StatusWindow()
+    status_window.start_deletion(
+        github_client,
+        repo_owner="example_owner",
+        repo_name="example_repo"
+    )
+    status_window.run()
